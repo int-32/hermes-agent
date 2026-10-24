@@ -171,7 +171,7 @@ def card(task):
             f"源记录更新时间：{task['updated']}（Asia/Shanghai）")
 
 
-def overview(tasks, targets=None, *, guild_id):
+def overview(tasks, targets=None, *, guild_id, pool=None):
     targets = targets or {}
     groups = collections.defaultdict(list)
     for task in tasks:
@@ -182,6 +182,11 @@ def overview(tasks, targets=None, *, guild_id):
              "同步：每5分钟纯脚本轮询；尚未实现事件触发。时间：Asia/Shanghai。",
              "布局：主区仅总览；状态卡与里程碑在各公共thread。Discord可能保留线程系统入口。",
              "验收/关单仅采用独立总控记录；完成分区不代表全部已上线。待确认审批仍在总控。"]
+    if pool is not None:
+        lines[:5] = ["问题与任务总览", "覆盖：已登记运维巡检、总控批准目标及当前profile HWB。",
+                     "独立会话须显式登记与接单；未登记会话不在覆盖范围。空闲不等于完成。",
+                     "登记→分派→回传→验收；仅展示轮询，无自主推进。时间：Asia/Shanghai。",
+                     "问题/任务分页见发现入口；原HWB状态卡及里程碑保留原thread。"]
     for (section, alias), rows in sorted(groups.items()):
         counts = collections.Counter(t["status"] for t in rows)
         lines.append(f"\n【{section} · {alias}】{len(rows)}任务：" + "、".join(f"{s}{n}" for s, n in sorted(counts.items())))
@@ -615,19 +620,27 @@ class Board:
             del self.state["messages"][key]
             self.save()
 
-    def sync(self, tasks):
+    def sync(self, tasks, pool=None):
         tasks = [dict(task) for task in tasks]
+        if pool is not None:
+            pool.validate_anchor(self.state)
+            from dev_progress_pool_display import validate_remote_pool
+            validate_remote_pool(self, pool)
         for task in tasks:
             self.sync_task(task)
         targets = {tid: row for tid, row in self.state["tasks"].items() if row.get("card_channel_id")}
-        summary = self.message("overview", self.channel_id, overview(tasks, targets, guild_id=self.guild_id))
+        prefix = ""
+        if pool is not None:
+            from dev_progress_pool_display import sync_pool
+            prefix = sync_pool(self, pool, tasks, targets)
+        summary = self.message("overview", self.channel_id, prefix + overview(tasks, targets, guild_id=self.guild_id, pool=pool))
         self.pin_overview(summary)
         self.remove_legacy_cards()
         self.archive_closed(tasks)
         self.state["layout_version"] = 2
         self.state["last_sync"] = datetime.now(TZ).isoformat()
         self.state["last_operations"] = dict(self.api.operations)
-        self.state["coverage"] = "仅当前profile HWB；仅5分钟轮询，无事件触发"
+        self.state["coverage"] = "当前profile HWB及显式登记的问题/双来源任务池；仅展示轮询，无自主推进" if pool is not None else "仅当前profile HWB；仅5分钟轮询，无事件触发"
         self.save()
 
 
@@ -671,13 +684,17 @@ def main():
         prior_state = json.loads(state_path.read_text(encoding="utf-8-sig")) if state_path.exists() else {"tasks": {}}
         validate_state_target(prior_state, target)
         validate_delivery_anchor(control, prior_state)
+        from dev_progress_pool import Pool
+        pool = Pool(args.state_dir / "pool.json")
+        pool.validate_anchor(prior_state)
         tasks = project_tasks(tasks, control)
         if args.dry_run:
-            print(json.dumps(tasks, ensure_ascii=False, indent=2))
+            preview = {"hwb_tasks": tasks, "pool": pool.data, "counts": pool.counts(tasks)} if pool.events else tasks
+            print(json.dumps(preview, ensure_ascii=False, indent=2))
             return
         api = Discord(token_from_home(args.home), args.guild_id, args.channel_id)
         board = Board(api, args.state_dir / "state.json")
-        board.sync(tasks)
+        board.sync(tasks, pool=pool)
         # Cron delivers locally; empty stdout also prevents a second notification surface.
 
 
