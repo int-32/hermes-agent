@@ -66,8 +66,9 @@ class CardBoundaryTests(unittest.TestCase):
         url = "https://example.invalid/evidence?a=1;b=2"
         checks = {"development": {"status": "passed", "evidence": [url]},
                   "merge": {"status": "unverified"}, "release": {"status": "unverified"}}
-        source = review.acceptance_text({"payload": {"checks": checks}})
-        row = dict(task(), acceptance=source)
+        event = {"payload": {"checks": checks}}
+        source = review.acceptance_text(event)
+        row = dict(task(), acceptance=source, acceptance_parts=review.acceptance_parts(event))
         fields = cards.hwb_detail(row)["fields"]
         rendered = next(f["value"] for f in fields if f["name"] == "三层验收")
         for stage in ("开发完成：已核验", "合入主线：未核验", "上线验收：未核验"):
@@ -121,8 +122,9 @@ class CardBoundaryTests(unittest.TestCase):
     def test_closed_url_acceptance_keeps_exact_old_or_new_format_and_unique_fields(self):
         checks = {"development": {"status": "passed", "evidence": ["https://example.invalid/evidence"]},
                   "merge": {"status": "unverified"}, "release": {"status": "unverified"}}
-        source = review.acceptance_text({"payload": {"checks": checks}})
-        row = dict(task("已完成"), acceptance=source, control_event={"approval_ref": "synthetic-close"})
+        event = {"payload": {"checks": checks}}
+        source = review.acceptance_text(event)
+        row = dict(task("已完成"), acceptance=source, acceptance_parts=review.acceptance_parts(event), control_event={"approval_ref": "synthetic-close"})
         detail = {"embeds": [cards.hwb_detail(row)]}
         latest = {"status": row["status"], "acceptance": source}
         cards.validate_closed_embed(row, latest, detail)

@@ -19,15 +19,13 @@ def units(value):
     return len(value.encode("utf-16-le")) // 2
 
 
-def clip(value, limit=180, *, multiline=False, stages=False):
+def clip(value, limit=180, *, multiline=False):
     value = str(value)
     if multiline:
         limit = min(limit, units(clip(value, limit)))
         # U+2028 remains whitespace for safe_label's whole-text secret matcher,
         # while surviving its CR/LF flattening. Restore line breaks only afterward.
         value = safe_label(value.replace("\r", "\u2028").replace("\n", "\u2028"), max(len(value), limit)).replace("\u2028", "\n")
-        if stages:
-            value = re.sub(r"｜(?=(?:合入主线|上线验收)：)", "\n", value)
         # Break prose at existing boundaries, leaving URLs and their punctuation intact.
         value = "".join(part if part.startswith(("https://", "http://")) else
                         re.sub(r"[；;。](?=[^\n])", "\n", part).replace("｜", "\n")
@@ -35,6 +33,10 @@ def clip(value, limit=180, *, multiline=False, stages=False):
     else:
         value = safe_label(value, max(len(value), limit))
     value = value.replace("[", "（").replace("]", "）")
+    return truncate(value, limit, multiline=multiline)
+
+
+def truncate(value, limit, *, multiline=False):
     if units(value) <= limit:
         return value
     hint = "…\n完整内容见材料引用/总控记录"
@@ -129,6 +131,18 @@ def detail_content(task):
     return content
 
 
+def hwb_acceptance(task, *, source=None):
+    source = task["acceptance"] if source is None else source
+    parts = task.get("acceptance_parts")
+    if parts is None:
+        return clip(source, 900)  # Unknown legacy strings have no trustworthy stage boundaries.
+    if (not isinstance(parts, list) or len(parts) != 3 or not all(isinstance(p, str) and p for p in parts)
+            or "｜".join(parts) != source):
+        raise RuntimeError("结构化验收与原三层事实冲突")
+    value = "\n".join(clip(part, 900, multiline=True) for part in parts)
+    return truncate(value, units(clip(source, 900)), multiline=True)
+
+
 def hwb_detail(task, guild_id=None, thread_id=None):
     pending = "、".join("#" + value for value in task["pending"])
     next_step = pending + "｜待总控决策" if pending else task.get("phase", "待总控核验下一步")
@@ -136,7 +150,7 @@ def hwb_detail(task, guild_id=None, thread_id=None):
     fields = [field("业务状态", task["status"]), field("执行者", clip(task["executor"], 80) + " · HWB"),
               field("目标 / 验收标准", clip(task.get("objective", "未独立登记目标；以总控任务书为准"), 220) + "\n" + clip(task.get("acceptance_criteria", "验收标准未独立登记；不从worker自评推断"), 220)),
               field("关键进展", clip(task["progress"], 400, multiline=True)), field("下一步 / 阻塞", clip(next_step, 400, multiline=True)),
-              field("三层验收", clip(task["acceptance"], 900, multiline=True, stages=True)), field("总控记录", clip(approval, 400)),
+              field("三层验收", hwb_acceptance(task)), field("总控记录", clip(approval, 400)),
               field("材料引用", clip(task["evidence"], 300)), field("源记录更新", clip(task["updated"], 60))]
     if thread_id and guild_id:
         fields.append(field("执行窗口", f"[HWB状态窗口](https://discord.com/channels/{guild_id}/{thread_id})\n原生会话链接未独立登记"))
@@ -150,7 +164,7 @@ def validate_closed_embed(task, latest, detail):
         return  # Original pure-text certificates remain valid and read-only.
     embeds = detail["embeds"]
     expected = {"业务状态": (latest["status"],),
-                "三层验收": (clip(latest["acceptance"], 900), clip(latest["acceptance"], 900, multiline=True, stages=True)),
+                "三层验收": (clip(latest["acceptance"], 900), hwb_acceptance(task, source=latest["acceptance"])),
                 "总控记录": (clip(task["control_event"]["approval_ref"], 400),)}
     if len(embeds) != 1 or embeds[0].get("footer", {}).get("text") != "HWB任务：" + task["id"]:
         raise RuntimeError("关闭Embed任务身份冲突")

@@ -6,6 +6,7 @@ import unittest
 from test_dev_progress_board import FakeDiscord, board, task
 import test_dev_progress_pool as fixtures
 import dev_progress_cards as cards
+import dev_progress_review as review
 
 
 def values(embed):
@@ -35,7 +36,8 @@ class CardLayoutTests(unittest.TestCase):
         self.assertTrue(home["content"].endswith(f"`[hwb-board:{board.digest('overview')[:24]}]`"))
 
     def test_hwb_acceptance_and_controller_notes_are_vertical_without_changing_facts(self):
-        row = dict(task(), disposition="开发：本地通过；合入：等待审查。上线：待总控验证", phase="等依赖；需总控确认。然后继续")
+        row = review.project_tasks([task()], review.ReviewLog(self.f.home / "display-control.json"))[0]
+        row.update(disposition="开发：本地通过；合入：等待审查。上线：待总控验证", phase="等依赖；需总控确认。然后继续")
         saved = self.sync([row])
         detail = self.api.messages[saved["tasks"][row["id"]]["message_id"]]
         fields = values(detail["embeds"][0])
@@ -71,7 +73,8 @@ class CardLayoutTests(unittest.TestCase):
         self.assertEqual(issue_values["来源与观察"].splitlines()[:2], ["project ", " 运维巡检"])
 
     def test_new_and_old_closed_acceptance_renderings_remain_read_only_and_exact(self):
-        closed = dict(task("已完成"), closed=True, control_head="close-layout",
+        closed = review.project_tasks([task("已完成")], review.ReviewLog(self.f.home / "display-control.json"))[0]
+        closed.update(closed=True, control_head="close-layout",
             control_event={"hash": "close-layout", "approval_ref": "approval:layout", "action": "close"})
         self.sync([task()])
         saved = self.sync([closed])

@@ -474,7 +474,7 @@ scripts/run_tests.sh tests/scripts/test_dev_progress_board.py \
   tests/scripts/test_dev_progress_cards.py tests/scripts/test_dev_progress_findings.py \
   tests/scripts/test_dev_progress_thread_layout.py tests/scripts/test_dev_progress_review_boundaries.py \
   tests/scripts/test_dev_progress_navigation.py tests/scripts/test_dev_progress_card_layout.py \
-  tests/scripts/test_dev_progress_card_boundaries.py
+  tests/scripts/test_dev_progress_card_boundaries.py tests/scripts/test_dev_progress_acceptance_parts.py
 python scripts/check --staged
 ```
 
@@ -491,10 +491,14 @@ python scripts/check --staged
 
 Embed计数将问题、任务、执行窗口各列一行；HWB三层验收按开发/合入/上线分别列行。
 总控说明和阻塞先整段沿用safe_label跨行键值脱敏，再保留换行；以换行替换阶段分隔符、分号或句号，不额外增字、不按固定字数换行。
-HWB验收先按系统开发/合入/上线边界分开，再处理各段URL，避免证据URL吞掉后续阶段；原始证据不改。
+HWB验收由ReviewLog的已验证checks生成临时三项acceptance_parts，渲染器只在这三项之间换行，再分别整段脱敏和保护URL。
+不从字符串或URL中的阶段同形文字猜边界；三项与原acceptance_text拼接值须精确一致。无结构化来源的旧fixture/未知串保留旧单行。
+真实旧日志从原checks重建三项；临时parts不写入日志、state或阶段快照，旧schema/哈希、acceptance_text及content/fallback逐字不变。
 来源、Owner、状态及链接纵向展示，不增加重复标签；原中点两旁空格保留，只替换分隔字符，字段/描述预算不比旧同事实值增长。
 分行纳入原UTF-16限额，超长摘要明示“完整内容见材料引用/总控记录”，原材料及content不改。
 旧归档验收卡保持只读；验收展示仅允许原单行或同一原验收生成的精确分行版本，事实冲突/重复字段仍拒绝。
+本次结构化展示的增量模块为dev_progress_review.py与dev_progress_cards.py；相对线上228988的完整排版升级共需这两项及dev_progress_pool_display.py三模块。
+七模块部署清单不变，身份/关单/auto_close逻辑不改；安装与生产读回仍由总控执行。
 
 首页分别显示活动问题、任务、执行窗口计数，优先显示HWB待决策/失败、显式阻塞回传和P0/P1问题。
 已关联pool的HWB窗口仍参与关注项检测，不因任务去重而隐藏待决策。

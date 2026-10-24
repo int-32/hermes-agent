@@ -260,16 +260,21 @@ def auto_close(home, log, board_state):
     return results
 
 
-def acceptance_text(event):
+def acceptance_parts(event):
     if not event:
-        return "｜".join(label + "：未核验" for label in STAGES.values())
+        return [label + "：未核验" for label in STAGES.values()]
+    validate_checks(event["payload"]["checks"])
     lines = []
     for key, label in STAGES.items():
         check = event["payload"]["checks"][key]
         suffix = "；理由：" + check["reason"][:96] if check["status"] in {"not_applicable", "unverified"} and check.get("reason") else ""
         refs = "；证据：" + "、".join(check.get("evidence", []))[:120] if check.get("evidence") else ""
         lines.append(label + "：" + LABELS[check["status"]] + suffix + refs)
-    return "｜".join(lines)
+    return lines
+
+
+def acceptance_text(event):
+    return "｜".join(acceptance_parts(event))
 
 
 def project_tasks(tasks, log):
@@ -284,7 +289,8 @@ def project_tasks(tasks, log):
         if state["latest"] and task.get("task_binding") and state["latest"]["binding"] != task["task_binding"]:
             raise ValueError("当前HWB登记身份与总控记录不一致，停止同步")
         task.update(closed=bool(state["close"]), control_head=state["latest"]["hash"] if state["latest"] else None,
-                    control_event=state["latest"], reopen_event=state["reopen"], acceptance=acceptance_text(state["review"]))
+                    control_event=state["latest"], reopen_event=state["reopen"], acceptance=acceptance_text(state["review"]),
+                    acceptance_parts=acceptance_parts(state["review"]))
         checks = state["review"]["payload"]["checks"] if state["review"] else {}
         task["disposition"] = "；".join(STAGES[key] + "：" + check.get("reason", "待总控核验")[:96]
                                          for key, check in checks.items() if check["status"] == "unverified")
