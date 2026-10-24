@@ -368,23 +368,27 @@ def sync_overview(board, tasks, targets, pool, prefix):
 
 
 def sync_overview_pages(board, rows):
+    from dev_progress_delivery import ensure_window
+    channel = ensure_window(board, "discovery")
     contents = field_groups([item for _, item in rows], max_fields=8, limit=4200)
     previous = board.state.get("overview_pages", 0)
     ids = []
     for number in range(max(previous, len(contents))):
         fields = list(contents[number]) if number < len(contents) else [field("记录已移动", "查看固定总览")]
         if ids:
-            fields.append(field("分页导航", f"[上一页](https://discord.com/channels/{board.guild_id}/{board.channel_id}/{ids[-1]})"))
+            fields.append(field("分页导航", f"[上一页](https://discord.com/channels/{board.guild_id}/{channel}/{ids[-1]})"))
         title = f"全部任务 · {number + 1}/{len(contents)}页" if number < len(contents) else f"历史总览页{number + 1} · 记录已移动"
         embed = make_card(title, fields, footer=f"共 {len(rows)} 任务 · 当前{len(contents)}页 · 每页最多8项")
-        ids.append(board.message(f"overview:page:{number + 1}", board.channel_id, title + "\n发布协议：1", embeds=[embed]))
+        ids.append(board.message(f"overview:page:{number + 1}", channel, title + "\n发布协议：1", embeds=[embed]))
     board.state["overview_pages"] = max(previous, len(contents))
     board.save()
-    return f"[全部 {len(rows)} 任务 · {len(contents)}页](https://discord.com/channels/{board.guild_id}/{board.channel_id}/{ids[len(contents) - 1]})"
+    return f"[全部 {len(rows)} 任务 · {len(contents)}页](https://discord.com/channels/{board.guild_id}/{channel}/{ids[len(contents) - 1]})"
 
 
 def restore_overview_pages(board):
-    history = list(board.api.history(board.channel_id))
+    from dev_progress_delivery import histories
+    history = histories(board)
+    channel = board.board_channels.get("discovery")
     count = max(len(history), board.state.get("overview_pages", 0))
     keys = {digest(f"overview:page:{n}")[:24]: (f"overview:page:{n}", n) for n in range(1, count + 1)}
     found = {}
@@ -395,12 +399,12 @@ def restore_overview_pages(board):
         if not matched:
             continue
         key, number = matched[0]
-        if len(markers) != 1 or key in found or message.get("author", {}).get("id") != board.api.bot or message.get("channel_id") != board.channel_id:
+        if len(markers) != 1 or key in found or message.get("author", {}).get("id") != board.api.bot or message.get("channel_id") != channel:
             raise RuntimeError("总览分页重复或归属冲突，禁止写入")
         cached = board.state["messages"].get(key, {})
-        if cached.get("id") and (cached["id"] != message["id"] or cached.get("channel") != board.channel_id):
+        if cached.get("id") and (cached["id"] != message["id"] or cached.get("channel") != channel):
             raise RuntimeError("总览分页映射冲突")
-        found[key] = {"id": message["id"], "channel": board.channel_id, "hash": digest(content), "payload_hash": payload_fingerprint(message)}
+        found[key] = {"id": message["id"], "channel": channel, "hash": digest(content), "payload_hash": payload_fingerprint(message)}
         board.state["overview_pages"] = max(board.state.get("overview_pages", 0), number)
     required = {f"overview:page:{n}" for n in range(1, board.state.get("overview_pages", 0) + 1)}
     if required != set(found):

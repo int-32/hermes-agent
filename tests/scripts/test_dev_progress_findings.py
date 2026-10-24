@@ -322,8 +322,9 @@ class FindingTests(unittest.TestCase):
 
         api, state = FakeDiscord(), self.f.home / "large-inventory-state.json"
         publisher = board.Board(api, state)
+        channel = delivery.ensure_window(publisher, "discovery")
         for n in range(1, 101):
-            publisher.message(f"pool:index:{n}", api.channel_id, f"index {n}/100\n任务池记录：{self.f.log.head}")
+            publisher.message(f"pool:index:{n}", channel, f"index {n}/100\n任务池记录：{self.f.log.head}")
         delivery.publish(publisher)
         roots = [m for m in api.messages.values() if m["content"].startswith(delivery.PREFIX) and '"version":1' in m["content"]]
         self.assertEqual(len(roots), 1)

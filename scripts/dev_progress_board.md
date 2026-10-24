@@ -261,11 +261,52 @@ worker自评、idle/stopped和回传均不能直接关单。
 原生窗口复用已有Discord会话URL，不为运维启动HWB worker或替代会话。
 HWB绑定真实登记身份，可另给实际会话URL；缺少时如实只展示原HWB状态窗口及执行标识。
 
-同步复用原总览ID及HWB详情卡/thread/阶段消息；另外创建固定问题入口及问题、任务、窗口、目录分页。
+同步复用原总览ID及HWB详情卡/thread/阶段消息。父频道只保留原固定总览；
+问题入口及问题、任务、窗口、目录分页放入其下专用公共“问题发现”线程，原总览链接该窗口。
+超过首页预算的全量任务总览分页也在该线程，不在父频道堆卡。
 分页有稳定标记，重复同步零写入，目录沿“上一页”可达所有页；过长字段标省略，全文用snapshot读取。
 新页丢回执先恢复历史，已有受控分页被删/归属变更则停止，不换ID补卡。
 分页和入口携带业务日志head，state丢失后也可发现pool丢失/回退，并在HWB写入前停止。
 首版只有既有展示轮询，没有自主调度、资产操作、自动审批或自动推进。
+
+### 公共窗口布局、恢复和成员验收
+
+沿用现有线程客户端和授权目标：只能创建/读写指定父文字频道下、同guild、bot拥有的公共线程（type=11）。
+“问题发现”承载用户可读的原生卡片、入口和全部分页；另一个“看板恢复记录”线程仅保存短登记说明及不可变发布清单。
+原总览保持原消息ID、只编辑重点和窗口链接；所有原HWB线程、详情、markers、里程碑及关单归档继续原位保留。
+不把技术JSON放父频道或业务卡，不增加按钮、消息转发、成员邀请或任何业务操作。
+
+线程映射记入`state.json.board_threads`，分别保存discovery/recovery的线程ID与登记消息ID。
+登记消息使用绑定guild/父频道/用途的固定marker；恢复先枚举授权父频道的活跃和已归档公共线程，
+读回验证guild/parent/type/bot owner，再检查唯一marker、消息bot作者、消息频道及完整固定正文。
+显示名可改，state整体丢失仍按marker恢复原ID，不能按同名接管；重复、缺失、身份/映射冲突在任何远端写前拒绝。
+已确认线程ID先落盘为pending，再发第一条登记消息；登记/分页/root回执丢失可按原marker恢复。
+线程创建本身回执未知且尚无marker时无法证明身份：同名未登记线程会阻断重试，不能擅自接管或另建重复线程。
+总控须核对原创建回执及可信备份再处理孤立线程；不能改ID或补签marker绕过历史冲突。
+两类展示线程自动归档后，无变化轮询保持零写入；只有确有新的展示消息/更新才解归档该展示线程。
+此规则不应用于原HWB任务线程，其解归档仍只认原总控reopen契约。
+
+**公共可见性**：两类线程都继承父频道的可见范围，不是私密隔离。
+查看需要父频道`VIEW_CHANNEL`，读回历史需要`READ_MESSAGE_HISTORY`；参与讨论需要`SEND_MESSAGES_IN_THREADS`，
+加入线程不覆盖父频道可见性。技术线程的“受控”指bot归属、固定标记及不可改写校验，不表示普通成员看不到。
+无需自动添加成员或修改profile；不能存放凭据、私密日志或超出父频道受众范围的材料。
+依据：[Discord线程权限](https://github.com/discord/discord-api-docs/blob/main/developers/topics/permissions.mdx#thread-permissions)、
+[Discord线程行为](https://github.com/discord/discord-api-docs/blob/main/developers/topics/threads.mdx)。
+
+由总控在部署验收时执行并记录：
+
+1. 读回两个线程的type=11、guild/parent、bot owner及唯一登记消息，与state映射逐项一致。
+2. 确认bot可查看父频道/历史、创建公共线程、在线程发送和嵌入卡片；归档后实际更新需具备相应线程管理权限。
+   403/不可读时停止，不回退向父频道发送细页，不扩大目标白名单。
+3. 用预期普通成员账号，从原总览链接打开“问题发现”，核对移动端入口、全部问题/任务/窗口目录及历史页可达；
+   能看父频道而不能打开/读历史时核对该成员的频道有效权限，不把“已加入成员列表”当可见性证明。
+4. 如需讨论，单独核验成员SEND_MESSAGES_IN_THREADS；没有讨论权限也应能按读权限浏览。脚本不代为邀请/通知成员。
+5. 技术线程单独读回root/分片和所有页面原ID；父频道脚本消息仍只有原overview，业务卡不出现原始JSON。
+6. 再同步必须POST/PATCH/PUT/DELETE为零，原HWB ID/归档及新线程ID不变；在备份副本验证state丢失恢复，不删生产state做实验。
+
+cc473的父频道pool/manifest布局尚未生产部署，本轮不自动搬迁或删除这种试验历史。
+若部署目录已有该试验布局映射/远端记录，新版会因频道/清单目标冲突拒绝；先交总控核对备份和迁移方案，不能静默换ID补卡。
+安装依赖仍为原七个Python模块，线程登记/恢复实现复用`dev_progress_delivery.py`及现有客户端，无新增服务或依赖。
 
 ### 原生CLI与文件导入协议
 
@@ -400,7 +441,8 @@ gateway/profile_routing.py及gateway/platforms/base.py负责inbound profile匹�
 ```sh
 scripts/run_tests.sh tests/scripts/test_dev_progress_board.py \
   tests/scripts/test_dev_progress_review.py tests/scripts/test_dev_progress_pool.py \
-  tests/scripts/test_dev_progress_cards.py
+  tests/scripts/test_dev_progress_cards.py tests/scripts/test_dev_progress_findings.py \
+  tests/scripts/test_dev_progress_thread_layout.py
 python scripts/check --staged
 ```
 
@@ -443,8 +485,9 @@ marker继续留在content，阶段快照和pool日志head格式不变；HWB四�
 state丢失后恢复原pool及总览分页ID与最大页数，内容缩短后标记退役页，避免残留过期活动卡；
 已登记分页缺失、标记重复或归属冲突时停止，不能靠重建绕过恢复。
 
-发布成功后追加不可改写的`HWB发布清单`，叶子每批最多8项原页面key/ID，多级分片后最后提交root。
-所有pool页（含入口与退役页）、总览分页及固定总览均在清单内；清单只保存映射，不携带日志/凭据/本机路径。
+发布成功后在独立“看板恢复记录”线程追加不可改写的`HWB发布清单`，叶子每批最多8项原页面key/ID/channel，多级分片后最后提交root。
+所有pool页（含入口与退役页）、总览分页及固定总览均在清单内；root绑定两类已登记线程，页面频道必须符合固定用途路由。
+清单只保存映射，不携带日志/凭据/本机路径；父频道和“问题发现”业务卡不显示原始JSON。
 恢复在任何远端写入前验证所有已提交清单、分片、原页面归属和ID；即使state整体丢失，缺中间页、尾页、整类页或清单分片也拒绝。
 首发未提交批次通过发布协议标记区分，可按原marker接续；页面/root响应丢失可读回原ID，不能替换原历史。
 缩页保留退役页及原清单；相同映射和内容重跑不新增清单或改写消息。

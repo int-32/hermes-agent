@@ -35,6 +35,7 @@ class FakeDiscord:
         self.operations = collections.Counter()
         self.messages = {}
         self.threads = {}
+        self.thread_meta = {}
         self.next_id = 100
         self.lose_reply = False
         self.calls = []
@@ -78,12 +79,21 @@ class FakeDiscord:
     def history(self, channel):
         return [dict(m) for m in self.messages.values() if m["channel_id"] == channel]
 
-    def thread(self, thread_id, name, legacy_name=None, *, create=True):
+    def public_threads(self):
+        candidates = {tid: {"id": tid, "name": name, "parent_id": self.channel_id, "guild_id": self.guild_id,
+                           "owner_id": self.bot, "type": 11, **self.thread_meta.get(tid, {})} for tid, name in self.threads.items()}
+        return {tid: meta for tid, meta in candidates.items() if meta["parent_id"] == self.channel_id and meta["owner_id"] == self.bot and meta["type"] == 11}
+
+    def thread(self, thread_id, name, legacy_name=None, *, create=True, recover=True):
         if thread_id:
             if thread_id not in self.threads:
                 raise RuntimeError("registered thread missing")
+            remote = {"parent_id": self.channel_id, "guild_id": self.guild_id, "owner_id": self.bot, "type": 11, **self.thread_meta.get(thread_id, {})}
+            if (remote["parent_id"] != self.channel_id or remote["guild_id"] != self.guild_id
+                    or remote["owner_id"] != self.bot or remote["type"] != 11):
+                raise RuntimeError("thread ownership conflict")
             return thread_id
-        found = [tid for tid, value in self.threads.items() if value in {name, legacy_name}]
+        found = [tid for tid, value in self.public_threads().items() if recover and value["name"] in {name, legacy_name}]
         if len(found) > 1:
             raise RuntimeError("duplicate threads")
         if found:
@@ -189,7 +199,8 @@ class BoardTests(unittest.TestCase):
         content = self.api.messages[saved["messages"]["overview"]["id"]]["content"]
         self.assertLessEqual(len(content.encode("utf-16-le")) // 2, 2000)
         # The same completeness contract now spans native cards and explicit pages.
-        entries = [field for message in self.api.history(TEST_CHANNEL)
+        directory = saved["board_threads"]["discovery"]["id"]
+        entries = [field for message in [*self.api.history(TEST_CHANNEL), *self.api.history(directory)]
                    for embed in message.get("embeds", []) for field in embed.get("fields", [])
                    if field["value"].startswith("任务：")]
         self.assertEqual({field["value"].splitlines()[0] for field in entries}, {"任务：" + row["id"] for row in rows})

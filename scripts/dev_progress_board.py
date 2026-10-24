@@ -357,7 +357,7 @@ class Discord:
                 return
             before = "&before=" + rows[-1]["id"]
 
-    def find_thread(self, names):
+    def public_threads(self):
         active = self.request("GET", f"/guilds/{self.guild_id}/threads/active")["threads"]
         candidates = list(active)
         before = ""
@@ -368,13 +368,16 @@ class Discord:
                 break
             stamp = page["threads"][-1]["thread_metadata"]["archive_timestamp"]
             before = "&before=" + urllib.parse.quote(stamp, safe="")
-        found = {t["id"]: t for t in candidates if t.get("name") in names
-                 and t.get("parent_id") == self.channel_id and t.get("owner_id") == self.bot and t.get("type") == 11}
+        return {t["id"]: t for t in candidates
+                if t.get("parent_id") == self.channel_id and t.get("owner_id") == self.bot and t.get("type") == 11}
+
+    def find_thread(self, names):
+        found = {tid: t for tid, t in self.public_threads().items() if t.get("name") in names}
         if len(found) > 1:
             raise RuntimeError("同任务存在多个thread，停止以防分裂历史")
         return next(iter(found.values()), None)
 
-    def thread(self, thread_id, name, legacy_name=None, *, create=True):
+    def thread(self, thread_id, name, legacy_name=None, *, create=True, recover=True):
         if thread_id:
             self.threads.add(thread_id)
             try:
@@ -384,7 +387,7 @@ class Discord:
             if thread is None:
                 raise RuntimeError("已登记thread不存在，停止而非重建历史")
         else:
-            thread = self.find_thread({name, legacy_name})
+            thread = self.find_thread({name, legacy_name}) if recover else None
             if thread is None:
                 if not create:
                     raise RuntimeError("关闭任务原thread不可恢复，禁止创建替代历史")
@@ -447,10 +450,14 @@ class Board:
         if not existing:
             # Stable nonce plus history reconciliation handles a crash before local state commit.
             body.update(nonce=digest(key)[:24], enforce_nonce=True)
+            from dev_progress_delivery import prepare_write
+            prepare_write(self, channel)
             existing = self.api.request("POST", f"/channels/{channel}/messages", body)
         elif existing.get("content") != content or (embeds is not None and payload_fingerprint(existing) != payload_fingerprint(body)):
-            if key.startswith(("stage:", "delivery:")):
+            if key.startswith(("stage:", "delivery:", "window:")):
                 raise RuntimeError("阶段消息不可改写；恢复远端历史后使用新序号")
+            from dev_progress_delivery import prepare_write
+            prepare_write(self, channel)
             existing = self.api.request("PATCH", f"/channels/{channel}/messages/{existing['id']}", body)
         if not existing or existing.get("channel_id") != channel:
             raise RuntimeError("消息写入/读回频道不符")
@@ -663,7 +670,8 @@ class Board:
 
     def sync(self, tasks, pool=None):
         tasks = [dict(task) for task in tasks]
-        from dev_progress_delivery import validate, publish
+        from dev_progress_delivery import restore_windows, validate, publish
+        restore_windows(self)
         validate(self)
         from dev_progress_cards import restore_overview_pages
         restore_overview_pages(self)
