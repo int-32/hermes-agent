@@ -48,7 +48,7 @@ def sync_pages(board, kind, lines=(), *, cards=None):
         embeds[0].setdefault("fields", []).append(field("分页", page_label))
         if ids:
             embeds[0]["fields"].append(field("分页导航", f"[上一页](https://discord.com/channels/{board.guild_id}/{board.channel_id}/{ids[-1]})"))
-        ids.append(board.message(key, board.channel_id, f"{kind} {number + 1}/{len(contents)}\n任务池记录：{board.pool_head}", embeds=embeds))
+        ids.append(board.message(key, board.channel_id, f"{kind} {number + 1}/{len(contents)}\n任务池记录：{board.pool_head}\n发布协议：1", embeds=embeds))
     board.state.setdefault("pool_pages", {})[kind] = max(len(contents), previous)
     board.save()
     return ids[:len(contents)]

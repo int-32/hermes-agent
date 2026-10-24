@@ -180,8 +180,9 @@ class CardTests(unittest.TestCase):
         fixture.goal()
         fixture.window()
         wid = next(iter(fixture.log.data["windows"]))
-        fixture.apply("receipt", {"task_id": "t1", "window_id": wid, "kind": "accepted", "progress": "已接单",
+        claim = fixture.apply("receipt", {"task_id": "t1", "window_id": wid, "kind": "accepted", "progress": "已接单",
             "next_step": "等待依赖", "blocker": "等待总控提供已授权文档"}, "ops")
+        fixture.apply("confirm_receipt", {"task_id": "t1", "claim_id": claim["hash"], "approval_ref": "confirm-blocker"}, evidence=["sha256:" + "b" * 64])
         for i in range(8):
             fixture.goal(f"普通任务-{i}")
         board.Board(self.api, self.state).sync([], pool=fixture.log)
@@ -189,7 +190,7 @@ class CardTests(unittest.TestCase):
         home = self.api.messages[saved["messages"]["overview"]["id"]]
         self.assertIn("等待总控提供已授权文档", visible(home))
         self.assertEqual(home["embeds"][0]["color"], cards.COLORS["attention"])
-        self.assertIn("https://discord.com/channels/100/200/300", visible(home))
+        self.assertIn("https://discord.com/channels/100000000000000001/200000000000000001/300000000000000001", visible(home))
         directory = fixture.home / "workers" / "worker-1"
         directory.mkdir(parents=True)
         meta = {"id": "worker-1", "tool": "codex", "status": "stopped", "pid": None,
@@ -239,7 +240,7 @@ class CardTests(unittest.TestCase):
                 "acceptance": "验收" * 250, "approval_ref": "批准" * 250, "issue_ids": []})
             fixture.apply("window", {"task_id": f"任务-{i}", "kind": "native", "profile": "原生运维",
                 "session_id": f"会话-{i}", "executor": "运维" * 45,
-                "url": "https://discord.com/channels/" + "1" * 180 + "/" + "2" * 180 + "/" + str(i + 1)})
+                "url": "https://discord.com/channels/" + "18446744073709551615/18446744073709551614/" + str(100000000000000000 + i)})
         board.Board(self.api, self.state).sync([], pool=fixture.log)
         for message in self.api.messages.values():
             cards.validate_payload(message["content"], message.get("embeds", []))

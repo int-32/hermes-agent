@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 from dev_progress_board import TZ, atomic_json, digest
 import dev_progress_review as review
+from dev_progress_evidence import versions
 
 STATES = {"unverified": "待核实", "ready": "待分派", "executing": "执行中",
           "awaiting_review": "待验收", "closed": "关闭", "duplicate": "重复", "deferred": "暂不处理"}
@@ -25,6 +26,7 @@ PAYLOAD_FIELDS = {
     "link": "issue_id task_id",
     "window": "task_id kind profile session_id executor binding url",
     "receipt": "task_id window_id kind progress next_step blocker",
+    "confirm_receipt": "task_id claim_id approval_ref",
     "review": "task_id approval_ref checks",
     "close": "task_id approval_ref reason outcome",
     "reopen": "task_id approval_ref reason",
@@ -51,10 +53,14 @@ def identifier(obj, key):
 
 def timestamp(obj):
     value = text(obj, "observed_at", 50)
+    if observed_time(value).tzinfo is None:
+        raise ValueError("observed_at必须包含时区")
+
+
+def observed_time(value):
     # Deployment also supports macOS system Python 3.9, which predates Z support.
     normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
-    if datetime.fromisoformat(normalized).tzinfo is None:
-        raise ValueError("observed_at必须包含时区")
+    return datetime.fromisoformat(normalized)
 
 
 def evidence(obj):
@@ -72,6 +78,8 @@ def window_url(value):
         raise ValueError("执行窗口须为Discord HTTPS原生会话链接")
     if not re.fullmatch(r"/channels/[0-9]+/[0-9]+(?:/[0-9]+)?", parsed.path) or parsed.netloc != "discord.com":
         raise ValueError("执行窗口链接无效")
+    if any(not re.fullmatch(r"[1-9][0-9]{16,19}", part) or int(part) >= 2 ** 64 for part in parsed.path.split("/")[2:]):
+        raise ValueError("执行窗口snowflake无效")
 
 
 class Pool:
@@ -109,7 +117,7 @@ class Pool:
     def reduce(self, event):
         request = event["request"]
         p = request["payload"]
-        if request["action"] in {"task", "review", "close", "reopen"}:
+        if request["action"] in {"task", "review", "close", "reopen", "confirm_receipt"}:
             tid = p.get("id") if request["action"] == "task" else p.get("task_id")
             for old in self.events:
                 previous = old["request"]["payload"]
@@ -163,6 +171,12 @@ class Pool:
             meta, _ = review.worker(home, identifier(p, "session_id"))
             if p.get("binding") != review.binding(meta):
                 raise ValueError("HWB执行窗口必须绑定当前真实登记身份")
+        if request["action"] == "confirm_receipt":
+            task = self.data["tasks"][p["task_id"]]
+            claim = task.get("claims", {})[p["claim_id"]]
+            if self.data["windows"][claim["window_id"]]["kind"] == "native":
+                return {"native": versions(self.path.parent, claim["evidence"] + request["evidence"])}
+            return {}
         if request["action"] not in {"review", "close"}:
             return {}
         task = self.data["tasks"][p["task_id"]]
@@ -172,6 +186,9 @@ class Pool:
         for wid in task["window_ids"]:
             window = self.data["windows"][wid]
             if window["kind"] != "hwb":
+                receipt = task["receipts"].get(wid)
+                if receipt:
+                    sources[wid] = {"native": versions(self.path.parent, receipt["materials"])}
                 continue
             row = rows.get(window["session_id"])
             sources[wid] = {"source_hashes": review.source_hashes(home, window["session_id"]),
@@ -182,8 +199,21 @@ class Pool:
 
     def work_hash(self, tid):
         task = self.data["tasks"][tid]
-        return digest({"task": {k: v for k, v in task.items() if k not in {"review", "closed", "updated", "outcome"}},
+        return digest({"task": {k: v for k, v in task.items() if k not in {"review", "closed", "updated", "outcome", "claims"}},
                        "windows": {wid: self.data["windows"][wid] for wid in task["window_ids"]}})
+
+    def review_valid(self, tid):
+        task = self.data["tasks"][tid]
+        checked = task["review"]
+        if not checked or checked["work_hash"] != self.work_hash(tid):
+            return False
+        try:
+            for wid, source in checked["hwb_sources"].items():
+                if "native" in source and source["native"] != versions(self.path.parent, task["receipts"][wid]["materials"]):
+                    return False
+        except (OSError, ValueError, KeyError):
+            return False
+        return True
 
     def task_status(self, tid):
         task = self.data["tasks"][tid]
@@ -235,6 +265,13 @@ def discover(log, p, event):
                 raise ValueError("同一次巡检观察冲突，请使用新的source_ref保留原证据")
             return
     issue["observations"].append({"at": event["at"], **observation})
+    # Severity is a high-water mark. A late/lower observation never clears an alert.
+    # A new escalation needs a fresh controller disposition even for a retired issue.
+    if p["severity"] < issue["severity"]:
+        issue.update(severity=p["severity"], title=p["title"], escalation_pending=True)
+    if p["severity"] in {"P0", "P1"} and issue["state"] in {"closed", "deferred", "duplicate"}:
+        issue["escalation_pending"] = True
+    issue["latest_observation"] = max(issue["observations"], key=lambda o: observed_time(o["observed_at"]))["source_ref"]
     issue["updated"] = event["at"]
 
 
@@ -268,7 +305,7 @@ def issue_state(log, p, event):
     issue.pop("duplicate_of", None)
     if state == "duplicate":
         issue["duplicate_of"] = p["duplicate_of"]
-    issue.update(state=state, reason=p["reason"], updated=event["at"])
+    issue.update(state=state, reason=p["reason"], updated=event["at"], escalation_pending=False)
 
 
 def create_task(log, p, event):
@@ -341,13 +378,26 @@ def receipt(log, p, event):
         raise ValueError("回传actor必须与登记执行者一致；真实性另由总控读回")
     if p.get("kind") not in {"accepted", "report"}:
         raise ValueError("回传kind须为accepted或report")
-    if p["kind"] == "report" and wid not in task["receipts"]:
-        raise ValueError("未实际接单，不能跳过接单直接回传")
     for key in ("progress", "next_step"):
         text(p, key)
     if "blocker" in p:
         text(p, "blocker")
-    task["receipts"][wid] = {**p, "at": event["at"], "evidence": event["request"]["evidence"], "event": event["hash"]}
+    task.setdefault("claims", {})[event["hash"]] = {**p, "at": event["at"], "evidence": event["request"]["evidence"], "event": event["hash"]}
+
+
+def confirm_receipt(log, p, event):
+    task = log.data["tasks"][identifier(p, "task_id")]
+    text(p, "approval_ref")
+    claim = task.get("claims", {})[text(p, "claim_id", 64)]
+    wid = claim["window_id"]
+    if task["closed"] or claim.get("confirmed_by"):
+        raise ValueError("任务已关闭或声明已核实")
+    if claim["kind"] == "report" and wid not in task["receipts"]:
+        raise ValueError("先核实真实接单，再确认回传")
+    claim["confirmed_by"] = event["hash"]
+    task["receipts"][wid] = {**claim, "event": event["hash"], "verified_by": event["request"]["actor"],
+        "approval_ref": p["approval_ref"], "materials": claim["evidence"] + event["request"]["evidence"],
+        "versions": event["hwb_sources"]}
     task["updated"] = event["at"]
 
 
@@ -384,18 +434,20 @@ def reopen_task(log, p, event):
     text(p, "reason")
     if not task["closed"]:
         raise ValueError("任务尚未关闭")
+    if any(log.data["issues"][iid]["state"] in {"closed", "duplicate", "deferred"} for iid in task["issue_ids"]):
+        raise ValueError("先由总控显式处理关联问题终态，再重开任务")
     old_refs = {e["request"]["payload"].get("approval_ref") for e in log.events
                 if e["request"]["payload"].get("task_id") == task["id"]}
     if p["approval_ref"] in old_refs:
         raise ValueError("重新开启必须使用新审批引用")
-    task.update(closed=False, review=None, receipts={}, updated=event["at"])
+    task.update(closed=False, review=None, receipts={}, claims={}, updated=event["at"])
     task.pop("close_event", None)
     task.pop("outcome", None)
 
 
 HANDLERS = {"discover": discover, "inspection": inspection, "issue_state": issue_state,
             "task": create_task, "link": link, "window": window, "receipt": receipt,
-            "review": review_task, "close": close_task, "reopen": reopen_task}
+            "confirm_receipt": confirm_receipt, "review": review_task, "close": close_task, "reopen": reopen_task}
 
 
 def main():

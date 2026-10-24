@@ -449,7 +449,7 @@ class Board:
             body.update(nonce=digest(key)[:24], enforce_nonce=True)
             existing = self.api.request("POST", f"/channels/{channel}/messages", body)
         elif existing.get("content") != content or (embeds is not None and payload_fingerprint(existing) != payload_fingerprint(body)):
-            if key.startswith("stage:"):
+            if key.startswith(("stage:", "delivery:")):
                 raise RuntimeError("阶段消息不可改写；恢复远端历史后使用新序号")
             existing = self.api.request("PATCH", f"/channels/{channel}/messages/{existing['id']}", body)
         if not existing or existing.get("channel_id") != channel:
@@ -663,6 +663,8 @@ class Board:
 
     def sync(self, tasks, pool=None):
         tasks = [dict(task) for task in tasks]
+        from dev_progress_delivery import validate, publish
+        validate(self)
         from dev_progress_cards import restore_overview_pages
         restore_overview_pages(self)
         if pool is not None:
@@ -681,6 +683,7 @@ class Board:
         self.pin_overview(summary)
         self.remove_legacy_cards()
         self.archive_closed(tasks)
+        publish(self)
         self.state["layout_version"] = 2
         self.state["last_sync"] = datetime.now(TZ).isoformat()
         self.state["last_operations"] = dict(self.api.operations)

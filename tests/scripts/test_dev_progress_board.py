@@ -22,6 +22,7 @@ SPEC.loader.exec_module(board)
 importlib.import_module("dev_progress_cards")
 importlib.import_module("dev_progress_pool")
 importlib.import_module("dev_progress_pool_display")
+importlib.import_module("dev_progress_delivery")
 sys.path.pop(0)
 TEST_GUILD = "100000000000000001"
 TEST_CHANNEL = "100000000000000002"

@@ -177,13 +177,16 @@ def window_fields(pool, task, targets, guild_id):
         receipt = task["receipts"].get(wid)
         value = clip(window["executor"], 80) + "｜" + ("已接单" if receipt else "拟分派，尚无接单证据")
         if window.get("url"):
-            value += "\n[实际执行窗口](" + window["url"] + ")"
+            value += "\n[" + ("已核实执行窗口" if receipt else "登记链接 · 待核实") + "](" + window["url"] + ")"
         else:
             value += "\n原生会话链接尚未提供"
         target = targets.get(window["session_id"]) if window["kind"] == "hwb" else None
         if target:
             value += f"\n[HWB状态窗口](https://discord.com/channels/{guild_id}/{target['thread_id']}/{target['message_id']})"
         fields.append(field("执行者 / 窗口", value))
+        pending = sum(c["window_id"] == wid and not c.get("confirmed_by") for c in task.get("claims", {}).values())
+        if pending:
+            fields.append(field("执行者声明 · 待核实", f"{pending}项未确认；不改变接单或当前进展，待总控原生读回。"))
         if receipt:
             fields.extend([field("关键进展", clip(receipt["progress"], 250)),
                            field("下一步 / 阻塞", clip(receipt["next_step"], 250)),
@@ -203,10 +206,11 @@ def pool_task_cards(pool, targets, guild_id, hwb_tasks):
                   field("目标 / 范围", clip(task["objective"], 300) + "\n" + clip(task["scope"], 300)),
                   field("验收标准", clip(task["acceptance"], 500))]
         checked = task["review"]
+        stale = bool(checked and not task["closed"] and not pool.review_valid(tid))
         checks = []
         for key, name in (("development", "开发完成"), ("merge", "合入主线"), ("release", "上线验收")):
             check = checked["checks"][key] if checked else {"status": "unverified"}
-            label = {"passed": "已核验", "unverified": "未核验", "not_applicable": "不适用"}[check["status"]]
+            label = "旧验收已失效 / 待重验" if stale else {"passed": "已核验", "unverified": "未核验", "not_applicable": "不适用"}[check["status"]]
             checks.append(name + "：" + label + ("｜" + clip(check["reason"], 150) if check.get("reason") else ""))
         fields.append(field("三层验收", "\n".join(checks)))
         fields.extend(window_fields(pool, task, targets, guild_id))
@@ -230,7 +234,7 @@ def issue_cards(pool, targets, guild_id):
     result = []
     items = sorted(pool.data["issues"].items(), key=lambda pair: (pair[1]["severity"], pair[0]))
     for iid, issue in items:
-        observation = issue["observations"][-1]
+        observation = next((o for o in issue["observations"] if o["source_ref"] == issue.get("latest_observation")), issue["observations"][-1])
         status = STATUS[pool.issue_status(iid)]
         owners = sorted({pool.data["windows"][wid]["executor"] for tid in issue["task_ids"] for wid in pool.data["tasks"][tid]["window_ids"]})
         fields = [field("状态 / 严重级别", issue["severity"] + " · " + status),
@@ -240,10 +244,12 @@ def issue_cards(pool, targets, guild_id):
                   field("材料引用", clip(observation["evidence"][0], 300))]
         if issue.get("duplicate_of"):
             fields.append(field("重复原问题", issue["duplicate_of"]))
+        if issue.get("escalation_pending"):
+            fields.append(field("待总控决策", "严重观察新增或恶化；原处置未自动重开，须重新核实。"))
         for tid in issue["task_ids"]:
             fields.append(field("关联任务", tid))
             fields.extend(window_fields(pool, pool.data["tasks"][tid], targets, guild_id)[:1])
-        color_status = "待决策" if issue["severity"] in {"P0", "P1"} and status not in {"关闭", "重复", "暂不处理"} else status
+        color_status = "待决策" if issue["severity"] in {"P0", "P1"} and (issue.get("escalation_pending") or status not in {"关闭", "重复", "暂不处理"}) else status
         result.extend(split_card(issue["title"], fields, description="问题：" + iid + " · " + issue["severity"] + " · " + status, status=color_status))
     for run in pool.data["inspections"]:
         result.append(make_card("巡检回传 · " + clip(run["source_ref"], 45),
@@ -263,7 +269,8 @@ def summary_rows(tasks, targets, pool, guild_id):
             windows = [pool.data["windows"][wid] for wid in task["window_ids"]]
             mapped.update(w["session_id"] for w in windows if w["kind"] == "hwb")
             owner = "、".join(sorted({w["executor"] for w in windows})) or "待总控分派"
-            links = ["[实际窗口](" + w["url"] + ")" for w in windows if w.get("url")]
+            links = ["[" + ("已核实执行窗口" if wid in task["receipts"] else "登记链接 · 待核实") + "](" + pool.data["windows"][wid]["url"] + ")"
+                     for wid in task["window_ids"] if pool.data["windows"][wid].get("url")]
             blockers = [r["blocker"] for r in task["receipts"].values() if r.get("blocker")]
             priority = 2 if task["closed"] else 0 if blockers else 1
             value = "任务：" + tid + "\nOwner：" + clip(owner, 100) + "\n" + (links[0] if links else "原生窗口链接尚未提供")
@@ -297,7 +304,7 @@ def active_counts(tasks, pool=None):
     active = [task for task in pool.data["tasks"].values() if not task["closed"]]
     window_ids = {wid for task in active for wid in task["window_ids"]}
     mapped = {pool.data["windows"][wid]["session_id"] for wid in window_ids if pool.data["windows"][wid]["kind"] == "hwb"}
-    issues = sum(pool.issue_status(iid) not in {"closed", "duplicate", "deferred"} for iid in pool.data["issues"])
+    issues = sum(i.get("escalation_pending", False) or pool.issue_status(iid) not in {"closed", "duplicate", "deferred"} for iid, i in pool.data["issues"].items())
     return {"issues": issues, "tasks": len(active) + len(hwb - mapped), "windows": len(window_ids) + len(hwb - mapped)}
 
 
@@ -313,14 +320,16 @@ def attention_fields(tasks, targets, pool, guild_id):
             value += f"\n[HWB状态窗口](https://discord.com/channels/{guild_id}/{target['thread_id']}/{target['message_id']})"
         fields.append(field("需关注 · " + task["status"], value))
     if pool is not None:
-        urgent = [i for i in pool.data["issues"].values() if i["severity"] in {"P0", "P1"} and pool.issue_status(i["id"]) not in {"closed", "deferred", "duplicate"}]
+        urgent = [i for i in pool.data["issues"].values() if i["severity"] in {"P0", "P1"} and (i.get("escalation_pending") or pool.issue_status(i["id"]) not in {"closed", "deferred", "duplicate"})]
         for issue in sorted(urgent, key=lambda i: (i["severity"], i["id"])):
             windows = [pool.data["windows"][wid] for tid in issue["task_ids"] for wid in pool.data["tasks"][tid]["window_ids"]]
             owners = "、".join(sorted({w["executor"] for w in windows})) or "待总控核实/分派"
             value = clip(issue["title"], 80) + "\nOwner：" + clip(owners, 80) + "\n" + issue["id"]
             links = [w["url"] for w in windows if w.get("url")]
             if links:
-                value += "\n[实际窗口](" + links[0] + ")"
+                value += "\n[登记窗口 · 核实状态见任务详情](" + links[0] + ")"
+            if issue.get("escalation_pending"):
+                value += "\n严重级别恶化 · 待总控重新处置"
             fields.append(field("高严重 · " + issue["severity"] + " · " + STATUS[pool.issue_status(issue["id"])], value))
     return fields
 
@@ -368,7 +377,7 @@ def sync_overview_pages(board, rows):
             fields.append(field("分页导航", f"[上一页](https://discord.com/channels/{board.guild_id}/{board.channel_id}/{ids[-1]})"))
         title = f"全部任务 · {number + 1}/{len(contents)}页" if number < len(contents) else f"历史总览页{number + 1} · 记录已移动"
         embed = make_card(title, fields, footer=f"共 {len(rows)} 任务 · 当前{len(contents)}页 · 每页最多8项")
-        ids.append(board.message(f"overview:page:{number + 1}", board.channel_id, title, embeds=[embed]))
+        ids.append(board.message(f"overview:page:{number + 1}", board.channel_id, title + "\n发布协议：1", embeds=[embed]))
     board.state["overview_pages"] = max(previous, len(contents))
     board.save()
     return f"[全部 {len(rows)} 任务 · {len(contents)}页](https://discord.com/channels/{board.guild_id}/{board.channel_id}/{ids[len(contents) - 1]})"

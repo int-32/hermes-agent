@@ -8,7 +8,8 @@
 ## 运行与部署
 
 在所属profile的专用部署目录放置 `dev_progress_board.py`、`dev_progress_review.py`、
-`dev_progress_pool.py`、`dev_progress_pool_display.py`、`dev_progress_cards.py` 和 `sync.sh`。
+`dev_progress_pool.py`、`dev_progress_pool_display.py`、`dev_progress_cards.py`、
+`dev_progress_delivery.py`、`dev_progress_evidence.py` 和 `sync.sh`。
 例如 `PROFILE_HOME="${HERMES_HOME:-$HOME/.hermes}"`，`BOARD_ROOT="$PROFILE_HOME/scripts/dev-progress-board"`。
 把以下入口模板的四个占位值替换为本地实际配置；目标ID不是凭据，bot token仍只从原profile的`.env`内存读取：
 
@@ -50,7 +51,7 @@ hermes cron status
 先从旧部署的GUILD/CHANNEL常量私下核对原授权目标，保持home、state目录及两项ID不变。
 暂停现有cron，等待已开始的run完成，再持有部署目录的`sync.lock`完成备份和原子安装；不能只暂停就假定无在途同步。
 只备份本任务Python脚本、sync.sh、state.json和存在的control.json/pool.json，不复制.env或修改旧证据。
-安装五个已复审Python脚本，并按上方模板为原入口增加两项ID及`"$@"`；不要新建重复cron。
+安装七个已复审Python脚本，并按上方模板为原入口增加两项ID及`"$@"`；不要新建重复cron。
 
 ```sh
 PROFILE_HOME="${HERMES_HOME:-$HOME/.hermes}"
@@ -248,11 +249,15 @@ scripts/run_tests.sh tests/scripts/test_dev_progress_board.py tests/scripts/test
 无问题用巡检回传登记，不增加问题/任务数。重复、暂不处理、关闭均保留原因与证据；
 重复指向原问题，禁止循环及重复链。有未关闭关联任务时不能隐藏问题。
 关闭后再次观察会追加材料并保留原处置，总控据此决定是否重开，不自动创建修复任务。
+严重级别显示全部历史观察的最高级别（P0最高），迟到观察或后续降级不会自动清除告警；
+最新观察按observed_at取最大值，不按到达顺序。恶化更新短标题，并标记待总控重新处置。
+终态问题的新P0/P1观察也进入关注计数，保留原终态；issue_state明确处置才清除待处置标记。
 
 任务仅来自`ops_inspection`（含运维自处理、开发修复）或`approved_goal`。
 总控先定义目标、范围、验收标准及批准引用；运维任务须先关联已核实问题。
-窗口关联仅为**拟分派**；没有执行者`accepted`回执始终待分派。
-全部窗口`report`后待验收；worker自评、idle/stopped和回传均不能直接关单。
+窗口关联仅为**拟分派**；执行者`receipt`仅为待核实声明，不提升状态，也不覆盖已确认进展。
+总控原生读回后独立`confirm_receipt`确认accepted才执行中；全部窗口report经确认后才待验收。
+worker自评、idle/stopped和回传均不能直接关单。
 原生窗口复用已有Discord会话URL，不为运维启动HWB worker或替代会话。
 HWB绑定真实登记身份，可另给实际会话URL；缺少时如实只展示原HWB状态窗口及执行标识。
 
@@ -278,7 +283,7 @@ pool_cli snapshot
 pool_cli verify
 ```
 
-请求恰含五个字段：`request_id`（稳定重试键）、`action`、`actor`（真实执行者）、
+请求恰含五个字段：`request_id`（稳定重试键）、`action`、`actor`（声明的执行者标签，不是身份认证）、
 `evidence`（1至10项原始证据引用）、`payload`（见下表）。ID最多100字符，可用字母、数字、下划线、点、短横线；
 文本默认最多500字符，时间为含时区ISO 8601。发现/窗口登记返回`issue_id`/`window_id`，其余返回head及请求ID。
 同ID同内容重跑返回原事件；同ID异内容拒绝。重试不要换ID。
@@ -312,12 +317,13 @@ pool_cli verify
 | `task` | id、source、project、title、objective、scope、acceptance、approval_ref、issue_ids列表 | 总控 |
 | `link` | issue_id、task_id；多对多，关联不确认问题 | 总控 |
 | `window` | task_id、kind(native/hwb)、profile、session_id、executor；native必需url；hwb必需binding，可另给url | 总控 |
-| `receipt` | task_id、window_id、kind(accepted/report)、progress、next_step；可选blocker为显式阻塞回传；actor匹配executor，report不能跳过接单 | 对应执行者 |
+| `receipt` | task_id、window_id、kind(accepted/report)、progress、next_step；可选blocker；actor匹配executor但仍仅登记待核实声明；返回head即claim_id | 对应执行者 |
+| `confirm_receipt` | task_id、claim_id、approval_ref；独立读回证据放evidence；report确认前须已确认accepted；同声明不能重复确认 | 总控 |
 | `review` | task_id、approval_ref、checks（三层结构同上文） | 总控 |
 | `close` | task_id、approval_ref、reason、outcome(completed/cancelled)；验收满足，completed须全部窗口回传 | 总控 |
-| `reopen` | task_id、approval_ref、reason；重置本轮验收和接单，保留历史 | 总控 |
+| `reopen` | task_id、approval_ref、reason；关联问题须先显式离开closed/duplicate/deferred，再重置本轮验收/声明/接单，保留历史 | 总控 |
 
-同任务新的task/review/close/reopen不可复用历史批准引用，换请求ID也不能复用。
+同任务新的task/confirm_receipt/review/close/reopen不可复用历史批准引用，换请求ID也不能复用。
 review绑定当前任务/关联/接单回传内容；变化必须重验。HWB的binding可从原review CLI的candidates取得。
 池任务close仍要求原HWB总控关单门槛通过，且原材料/control head未在池验收后变化；取消也不能绕过。
 池任务reopen不替原HWB生成reopen事件，thread解归档仍走原总控命令。
@@ -334,9 +340,34 @@ review绑定当前任务/关联/接单回传内容；变化必须重验。HWB的
 
 原生窗口payload：
 `{"task_id":"goal-task-001","kind":"native","profile":"<profile名>","session_id":"<真实会话ID>","executor":"ops-executor","url":"https://discord.com/channels/<guild>/<channel>/<message>"}`。
-URL只导航，不是脚本网络目标。执行者真正接收后才提交独立accepted请求：
+URL必须为discord.com HTTPS固定路径、每段17至20位非零snowflake且小于2的64次方；
+只导航，不是脚本网络目标。未确认显示“登记链接 · 待核实”，确认后显示“已核实执行窗口”。
+执行者真正接收后才提交独立accepted声明：
 `{"task_id":"goal-task-001","window_id":"<返回ID>","kind":"accepted","progress":"<实际接收情况>","next_step":"<下一步>"}`；
-完成受托范围后提交新的report请求并附原始材料。CLI不自行发送运维任务。
+完成受托范围后提交新的report声明并附原始材料。每次均由总控经原身份门控执行：
+
+```json
+{
+  "request_id": "confirm-receipt-001", "action": "confirm_receipt", "actor": "controller",
+  "evidence": ["file:readback-001.md"],
+  "payload": {"task_id": "goal-task-001", "claim_id": "<receipt返回的head>", "approval_ref": "<独立真实读回批准引用>"}
+}
+```
+
+CLI不自行发送运维任务，声明不会因为actor相等、请求重试或轮询而自动确认。
+未确认声明单独计数并标待核实；确认后进展仅来自已核实的声明。重开清除当前声明投影，不能确认上一轮声明。
+
+原生材料使用`file:<相对路径>`或`sha256:<64位小写内容摘要>`。
+文件仅从`$BOARD_ROOT/evidence/`读取，须为非隐藏的.txt/.md/.json/.log普通文件、单硬链接且不超过1MiB；
+禁止绝对路径、上级目录、符号链接、特殊文件；逐层NOFOLLOW打开并检测读取中变化，不访问网络或任意本机路径。
+总控把需核验的非敏感材料放入专用目录；既有共享文档在其他目录时先复制审核材料，不能把整个目录链接进来。
+sha256引用是明确的不可变内容版本声明，脚本不会下载它；总控仍须知道对应材料位置并核实实际内容及摘要。
+仅路径字符串、可变URL或artifact引用不能单独满足native材料版本门槛。
+确认时记录材料摘要，review重新读取当前字节并绑定其摘要；close提交前后再次读取并比较review版本。
+文件变更、丢失或任务/关联/已确认回执改变后，旧验收标“已失效 / 待重验”，不能沿用旧review关单。
+新review可明确核验新版本；旧事件和旧摘要不改写。确认前的未核实声明不使有效验收失效。
+旧候选日志中未经确认的receipt在新投影中仅作声明；若旧close依赖它或无版本材料，校验安全退出。
+不自动篡改/重签旧pool日志；部署前由总控检查并备份，必要时用原材料在新池显式重新登记和核验。
 
 仅discover/inspection/receipt允许worker环境；其他操作沿用require_controller，拒绝Codex/Claude标记及HWB祖先链。
 这是同UID防误用与审计边界，actor/引用不是身份认证或数字签名。
@@ -347,16 +378,16 @@ CLI检查结构、一致性、因果，不能证明证据语义；总控须读�
 
 1. 总控指定共享交接文档路径、真实会话链接、CLI位置及任务ID/范围/验收，创建任务并关联窗口。
 2. 总控及通信执行者安排独立运维主会话真实接收；`hermes send`只证明发送，不证明agent接收。
-   运维原生会话读回任务后用CLI提交accepted及接收证据，不让看板worker冒充，不改profile/gateway。
+   运维原生会话读回任务后用CLI提交accepted声明及接收证据；总控原生读回后confirm_receipt，不让看板worker冒充，不改profile/gateway。
 3. 运维真实检查，写交接文档，提交discover或inspection和该任务report。
    文档含任务ID、检查对象/范围、时间、来源/命令、实际观察、限制及原始证据位置；无问题也须范围和证据。
-4. 总控读回同一文档和原生会话后确认/分派/验收。此链路未实测时只能报告“CLI及本地协议已实现”。
+4. 总控读回同一文档和原生会话后confirm_receipt确认report，再按三层标准review/close。此链路未实测时只能报告“CLI及本地协议已实现”。
 
 源码依据：hermes_cli/send_cmd.py的cmd_send单次投递不启动agent；
 gateway/profile_routing.py及gateway/platforms/base.py负责inbound profile匹配。配置存在不等于实接成功。
 本版不新增通信或调度器，不改变资产操作归属；缺少真实会话或文档路径由总控补齐。
 
-升级按前文暂停既有展示cron、等在途结束，持sync.lock备份并原子安装五个Python脚本。
+升级按前文暂停既有展示cron、等在途结束，持sync.lock备份并原子安装七个Python脚本及专用evidence目录中的核验材料。
 原state/control/历史证据原位保留；pool不存在表示尚无登记，首次apply才创建，不合成历史问题/验收。
 先在备份副本运行pool verify、原review verify、sync --dry-run，检查计数和原目标绑定；
 空pool保留旧dry-run列表格式，有pool事件时返回hwb_tasks/pool/counts对象。
@@ -393,7 +424,7 @@ HWB缺少独立目标/验收标准时如实标未登记，不能从prompt或work
 详情用字段突出目标/范围与验收、关键进展、下一步/阻塞、窗口及三层验收。
 长日志/长证据留原thread或源文档，卡片只给短引用；省略以`…`明示，完整材料仍可用snapshot/原证据读取。
 receipt可选`blocker`用于执行者明确回传阻塞（1至500字符）；不从progress/next_step关键词推断阻塞。
-新的无blocker回传可更新当前显示，原事件留在日志。它只是带证据的待核实回传，不自动批准、执行或关单。
+新的无blocker回传经总控确认后可更新当前显示，原事件留在日志。声明不会自动批准、执行或关单。
 
 每消息最多10个Embed、合计6000字符；单Embed标题256、description4096、字段25个、字段名256/值1024、
 footer2048、author.name256；content仍最多2000字符。实现采用UTF-16计数保守覆盖emoji，发送前校验，
@@ -412,7 +443,14 @@ marker继续留在content，阶段快照和pool日志head格式不变；HWB四�
 state丢失后恢复原pool及总览分页ID与最大页数，内容缩短后标记退役页，避免残留过期活动卡；
 已登记分页缺失、标记重复或归属冲突时停止，不能靠重建绕过恢复。
 
-部署仍由总控独立执行。新增文件必须随其余四个Python脚本一起安装；不改cron、gateway或运维profile。
+发布成功后追加不可改写的`HWB发布清单`，叶子每批最多8项原页面key/ID，多级分片后最后提交root。
+所有pool页（含入口与退役页）、总览分页及固定总览均在清单内；清单只保存映射，不携带日志/凭据/本机路径。
+恢复在任何远端写入前验证所有已提交清单、分片、原页面归属和ID；即使state整体丢失，缺中间页、尾页、整类页或清单分片也拒绝。
+首发未提交批次通过发布协议标记区分，可按原marker接续；页面/root响应丢失可读回原ID，不能替换原历史。
+缩页保留退役页及原清单；相同映射和内容重跑不新增清单或改写消息。
+无清单的旧版使用入口和n/N计数验证完整性后升级；无法证明完整的旧历史须从备份恢复，不按现有任务数猜缺页。
+
+部署仍由总控独立执行。七个Python模块必须一起安装；不改cron、gateway或运维profile。
 真实验收需读回message.embeds并核对原ID、中文分页及权限；再次同步确认零写入。
 旧纯文本迁移和无变化测试已覆盖，不代表真实Discord移动端视觉或当前bot的Embed权限已验收。
 

@@ -27,11 +27,11 @@ class PoolTests(unittest.TestCase):
         self.addCleanup(self.guard.stop)
         self.number = 0
 
-    def apply(self, action, payload, actor="controller", request_id=None):
+    def apply(self, action, payload, actor="controller", request_id=None, evidence=None):
         self.number += 1
         return self.log.apply(self.home, {
             "request_id": request_id or f"request-{self.number}", "action": action,
-            "actor": actor, "evidence": ["artifact:raw"], "payload": payload})
+            "actor": actor, "evidence": evidence or ["artifact:raw"], "payload": payload})
 
     def discover(self, key="disk", run="run-1"):
         return self.apply("discover", {"source": "ops_inspection", "source_ref": run,
@@ -45,11 +45,13 @@ class PoolTests(unittest.TestCase):
 
     def window(self, tid="t1", session="session-1"):
         return self.apply("window", {"task_id": tid, "kind": "native", "profile": "ops",
-            "session_id": session, "executor": "ops", "url": "https://discord.com/channels/100/200/300"})
+            "session_id": session, "executor": "ops", "url": "https://discord.com/channels/100000000000000001/200000000000000001/300000000000000001"})
 
     def receipt(self, wid, kind, tid="t1"):
-        return self.apply("receipt", {"task_id": tid, "window_id": wid, "kind": kind,
+        claim = self.apply("receipt", {"task_id": tid, "window_id": wid, "kind": kind,
             "progress": "原始材料已登记", "next_step": "由总控验收"}, "ops")
+        return self.apply("confirm_receipt", {"task_id": tid, "claim_id": claim["hash"],
+            "approval_ref": "readback-" + claim["hash"]}, evidence=["sha256:" + "a" * 64])
 
     def test_repeat_inspection_dedupes_issue_but_keeps_observations_and_no_findings(self):
         self.discover()
@@ -186,7 +188,7 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(ids, set(api.messages))
         overview = next(m["content"] for m in api.messages.values() if "问题 1｜任务 2｜执行窗口 2" in m["content"])
         self.assertIn("问题发现入口", overview)
-        self.assertIn("https://discord.com/channels/100/200/300", json.dumps(list(api.messages.values()), ensure_ascii=False))
+        self.assertIn("https://discord.com/channels/100000000000000001/200000000000000001/300000000000000001", json.dumps(list(api.messages.values()), ensure_ascii=False))
         saved = json.loads(state.read_text())
         self.path.unlink()
         with self.assertRaises(ValueError):
@@ -373,8 +375,9 @@ class PoolTests(unittest.TestCase):
         for i in range(6):
             self.window(session=f"session-{i}")
         for wid in self.log.data["windows"]:
-            self.apply("receipt", {"task_id": "t1", "window_id": wid, "kind": "accepted",
+            claim = self.apply("receipt", {"task_id": "t1", "window_id": wid, "kind": "accepted",
                 "progress": "L" * 300, "next_step": "N" * 300}, "ops")
+            self.apply("confirm_receipt", {"task_id": "t1", "claim_id": claim["hash"], "approval_ref": "confirm-" + wid}, evidence=["sha256:" + "b" * 64])
         api = FakeDiscord()
         state = self.home / "state.json"
         board.Board(api, state).sync([task()], pool=self.log)
