@@ -36,10 +36,12 @@ def restore_windows(board):
     """A name only detects an unfinished creation; ownership plus marker proves identity."""
     cached = board.state.get("board_threads", {})
     board.board_channels = {}
+    board.thread_histories = {}
     found, unmarked = {}, set()
     for tid, meta in board.api.public_threads().items():
         board.api.thread(tid, "", create=False)  # Validates guild/parent/owner/type before history access.
         history = list(board.api.history(tid))
+        board.thread_histories[tid] = history
         marked = False
         for role in WINDOWS:
             row = read_registration(board, role, tid, history)
@@ -231,22 +233,110 @@ def controlled_pages(board, history):
     return found
 
 
+def page_family(key):
+    return key.rsplit(":", 1)[0] if key.rsplit(":", 1)[-1].isdigit() else key
+
+
+# Renderer contract: these fields belong to the first Embed only. User titles,
+# task fields and window descriptions cannot declare a page-navigation role.
+NAVIGATION_FIELDS = {
+    "overview": {"全部任务": ("overview:page",), "问题与任务入口": ("pool:entry",)},
+    "pool:entry": {"分页目录": ("pool:index",)},
+}
+DIRECTORY_TARGETS = ("pool:issues", "pool:tasks", "pool:windows")
+
+
+def navigation_sections(key, message):
+    family = page_family(key)
+    schema = dict(NAVIGATION_FIELDS.get(family, {}))
+    if family in {"overview:page", *("pool:" + kind for kind in KINDS)} and int(key.rsplit(":", 1)[-1]) > 1:
+        schema["分页导航"] = (key.rsplit(":", 1)[0] + ":" + str(int(key.rsplit(":", 1)[-1]) - 1),)
+    reserved = {"全部任务", "问题与任务入口", "分页目录", "分页导航"}
+    seen = set()
+    for number, embed in enumerate(message.get("embeds", [])):
+        for item in embed.get("fields", []):
+            name = item.get("name")
+            if name not in reserved:
+                continue
+            if number != 0 or name not in schema or name in seen:
+                raise RuntimeError("系统导航字段与来源页面结构冲突")
+            seen.add(name)
+            yield schema[name], item.get("value", ""), True
+        if number == 0 and family == "pool:index" and embed.get("description"):
+            yield DIRECTORY_TARGETS, embed["description"], True
+    required = set(schema) if family != "overview" and message.get("embeds") else set()
+    if required - seen:
+        raise RuntimeError("原生页面缺少固定系统导航字段")
+    yield from legacy_navigation_sections(key, message.get("content", ""))
+
+
+def legacy_navigation_sections(key, content):
+    """Known fallback positions only; no user-visible link label is a protocol."""
+    lines = content.splitlines()
+    counter = r"问题 [0-9]+｜任务 [0-9]+｜执行窗口 [0-9]+"
+    if key == "overview" and len(lines) > 2 and all(re.fullmatch(counter, line) for line in lines[:2]):
+        yield ("pool:entry",), lines[2], True
+    elif page_family(key) == "pool:index" or key == "pool:entry":
+        # Old plain-text directories kept navigation after the fixed header/head.
+        header = r"index [1-9][0-9]*/[0-9]+" if key != "pool:entry" else "问题发现入口"
+        if not lines or not re.fullmatch(header, lines[0]):
+            if "https://" in content or "](" in content:
+                raise RuntimeError("未知目录页面格式，不能猜测原导航")
+            return  # Text-only old cards still use the immutable page inventory.
+        body = "\n".join(lines[2:-1])
+        if "https://" in body or "](" in body:
+            yield (*DIRECTORY_TARGETS, "pool:index"), body, True
+
+
+def link_targets(text, required):
+    links = list(re.finditer(r"\[[^\]\n]+\]\(([^\s)]+)\)", text))
+    remainder = re.sub(r"\[[^\]\n]+\]\(([^\s)]+)\)", "", text)
+    if (required and not links) or "https://" in remainder or "](" in remainder:
+        raise RuntimeError("受控导航缺少原始页面链接或格式未知")
+    for link in links:
+        target = re.fullmatch(r"https://discord\.com/channels/([0-9]+)/([0-9]+)/([0-9]+)", link[1])
+        if not target:
+            raise RuntimeError("受控链接目标格式无效")
+        yield target.groups()
+
+
+def execution_targets(board):
+    """Read original detail identities only inside already verified public threads."""
+    found = {}
+    for channel, history in board.thread_histories.items():
+        if channel in board.board_channels.values():
+            continue
+        for message in history:
+            content = message.get("content", "")
+            tids = re.findall(r"^任务：([^\n]+)$", content, re.MULTILINE)
+            if len(tids) != 1:
+                continue
+            key = "detail:" + tids[0]
+            marker = f"`[hwb-board:{digest(key)[:24]}]`"
+            if (not content.endswith(marker) or len(re.findall(r"\[hwb-board:[0-9a-f]{24}\]", content)) != 1
+                    or message.get("author", {}).get("id") != board.api.bot or message.get("channel_id") != channel):
+                continue
+            found[message["id"]] = (key, message)
+    return found
+
+
+def validate_link(board, target, guild, channel, allowed):
+    if (guild != board.guild_id or not target or target[1].get("channel_id") != channel
+            or (target[0] not in allowed and page_family(target[0]) not in allowed)):
+        raise RuntimeError("原导航指向的页面缺失或目标冲突，禁止替换历史")
+
+
 def validate_navigation(board, controlled):
-    link = re.compile(r"\[([^\]\n]+)\]\(https://discord\.com/channels/([0-9]+)/([0-9]+)/([0-9]+)\)")
-    labels = re.compile(r"问题发现(?:入口|窗口)(?:（公共窗口）)?|全部\s+\d+\s+任务.*|全部任务.*|问题\s*/\s*任务\s*/\s*执行窗口|(?:问题|任务|HWB窗口|目录)\d+|上一页")
-    for _, message in controlled.values():
-        texts = [(message.get("content", ""), False)]
-        for embed in message.get("embeds", []):
-            texts.append((embed.get("description", ""), False))
-            texts.extend((f.get("value", ""), f.get("name") in {"全部任务", "问题与任务入口", "分页目录", "分页导航"}) for f in embed.get("fields", []))
-        for text, navigation in texts:
-            links = [m for m in link.finditer(text) if navigation or labels.fullmatch(m[1])]
-            if navigation and not links:
-                raise RuntimeError("受控导航缺少原始页面链接")
-            for ref in links:
-                target = controlled.get(ref[4])
-                if ref[2] != board.guild_id or not target or target[1].get("channel_id") != ref[3]:
-                    raise RuntimeError("原导航指向的页面缺失或目标冲突，禁止替换历史")
+    executions = execution_targets(board)
+    for key, message in controlled.values():
+        for allowed, text, required in navigation_sections(key, message):
+            for guild, channel, mid in link_targets(text, required):
+                validate_link(board, controlled.get(mid), guild, channel, allowed)
+        if page_family(key) == "pool:windows":
+            for embed in message.get("embeds", []):
+                for guild, channel, mid in link_targets(embed.get("description", ""), False):
+                    target = executions.get(mid)
+                    validate_link(board, target, guild, channel, (target[0],) if target else ())
 
 
 def walk(nodes, node, ancestors):

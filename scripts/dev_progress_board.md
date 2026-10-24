@@ -472,7 +472,8 @@ gateway/profile_routing.py及gateway/platforms/base.py负责inbound profile匹�
 scripts/run_tests.sh tests/scripts/test_dev_progress_board.py \
   tests/scripts/test_dev_progress_review.py tests/scripts/test_dev_progress_pool.py \
   tests/scripts/test_dev_progress_cards.py tests/scripts/test_dev_progress_findings.py \
-  tests/scripts/test_dev_progress_thread_layout.py tests/scripts/test_dev_progress_review_boundaries.py
+  tests/scripts/test_dev_progress_thread_layout.py tests/scripts/test_dev_progress_review_boundaries.py \
+  tests/scripts/test_dev_progress_navigation.py
 python scripts/check --staged
 ```
 
@@ -527,6 +528,33 @@ state丢失后恢复原pool及总览分页ID与最大页数，内容缩短后标
 所有可信叶子和中间节点即使失去root也核验原key/ID/channel，不能降为“没有清单”；仅缺root且原页面齐全时可按原ID续提交。
 受控总览/入口/目录/上一页中的原导航链接均在写前核对，不访问链接指向的网络位置。
 state与旧入口/整类页面同时丢失时，幸存总览正文/Embed或目录中的原链接仍是原ID证据，不能补造新卡或自动搬迁旧父频道布局。
+
+### 导航结构与执行窗口链接契约
+
+导航用途由已核验marker对应的来源page key与固定位置决定，**不读取链接label判定用途**。
+`任务1`、`问题1`、`HWB窗口1`、`目录1`、`上一页`及系统字段同名标题均为合法普通任务名。
+渲染器与写前验证器遵守以下固定结构；导航字段只允许出现在第一张Embed，不能重复或移入续卡：
+
+| 来源key | 系统位置 | 原目标key |
+|---|---|---|
+| overview | 全部任务字段 | overview:page:N |
+| overview | 问题与任务入口字段 | pool:entry |
+| pool:entry | 分页目录字段（原生卡必需） | pool:index:N |
+| pool:index:N | 第一张Embed的description，完整分页目录 | pool:issues:N、pool:tasks:N、pool:windows:N |
+| overview:page:N、pool:各类:N，N大于1 | 分页导航字段（原生卡必需） | 同类前一页，精确N-1 |
+| pool:windows:N | description中的任务链接 | 原HWB线程中detail:任务ID的原详情消息，属于执行窗口而非分页 |
+
+导航从受控页面映射核验原消息ID、目标key用途、guild、用途channel及作者/marker；
+即使目标是另一个完整的受控页面，用途或上一页序号错误也拒绝。
+执行窗口映射仅来自既有客户端验证过guild/parent/bot owner/type的公共线程历史；
+详情须含固定`任务：ID`行、对应detail marker、正确作者和channel，且链接指向该原消息ID。
+不按线程名或任务标题认领；不访问链接URL，不扩大客户端请求白名单，不用当前任务数量补缺页。
+
+旧总览fallback仅在固定连续两行计数之后读取第三行的入口链接；旧纯文本入口/目录仅按固定页头和任务池head位置读取导航正文。
+旧目录Embed仍以来源pool:index的description读取；未知且含链接的旧目录格式停止，不能猜label或跳过原目标。
+不含链接的旧纯文本卡继续按原不可变清单及n/N完整性恢复；原HWB纯文本卡、markers、关单证据、归档和锁均沿用原契约。
+完整清单、孤立可信叶子、旧入口缺失及幸存原导航仍在任何远端写入前验证；普通无marker外来文字不参与协议。
+本次不新增磁盘格式、运行模块或依赖，安装仍为前述七个模块；CLI及业务操作协议不变。
 
 部署仍由总控独立执行。七个Python模块必须一起安装；不改cron、gateway或运维profile。
 真实验收需读回message.embeds并核对原ID、中文分页及权限；再次同步确认零写入。
