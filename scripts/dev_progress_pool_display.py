@@ -111,7 +111,7 @@ def validate_remote_pool(board, pool):
         matches = re.findall(r"\[hwb-board:([0-9a-f]{24})\]", content)
         key = markers.get(matches[0]) if len(matches) == 1 else None
         if not key:
-            if "任务池记录：" in content and "[hwb-board:" in content:
+            if "任务池记录：" in content and matches:
                 raise RuntimeError("未知任务池分页标记，停止恢复")
             continue
         if key in found or message.get("author", {}).get("id") != board.api.bot or message.get("channel_id") != channel or not content.endswith(f"`[hwb-board:{matches[0]}]`"):

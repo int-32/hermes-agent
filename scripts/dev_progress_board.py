@@ -739,7 +739,7 @@ def main():
         validate_state_target(prior_state, target)
         validate_delivery_anchor(control, prior_state)
         from dev_progress_pool import Pool
-        pool = Pool(args.state_dir / "pool.json")
+        pool = Pool(args.state_dir / "pool.json", home=args.home)
         pool.validate_anchor(prior_state)
         if not args.dry_run:
             auto_close(args.home, control, prior_state)

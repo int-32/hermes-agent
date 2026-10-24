@@ -407,8 +407,38 @@ sha256引用是明确的不可变内容版本声明，脚本不会下载它；�
 确认时记录材料摘要，review重新读取当前字节并绑定其摘要；close提交前后再次读取并比较review版本。
 文件变更、丢失或任务/关联/已确认回执改变后，旧验收标“已失效 / 待重验”，不能沿用旧review关单。
 新review可明确核验新版本；旧事件和旧摘要不改写。确认前的未核实声明不使有效验收失效。
-旧候选日志中未经确认的receipt在新投影中仅作声明；若旧close依赖它或无版本材料，校验安全退出。
-不自动篡改/重签旧pool日志；部署前由总控检查并备份，必要时用原材料在新池显式重新登记和核验。
+HWB的meta/events字节或独立control head变化时，未关闭任务的旧池验收也标“已失效 / 待重验”，
+展示复用与关单相同的来源预检。运行态home由原CLI显式绑定，不读其他profile；缺少上下文或材料不可读时不能继续显示有效。
+已关闭任务保留关闭时的历史验收；关闭后的HWB活动冲突继续提示总控决策，不自动重开或改写历史证书。
+
+### pool磁盘版本及安全升级边界
+
+新建/正常追加的日志使用`version: 2`与`receipt_semantics: "claims-controller-confirmed-v1"`，
+明确receipt仅为声明、独立总控confirm_receipt才参与接单/回传。未知版本或缺失/未知语义标签安全拒绝；
+verify额外显示format_version及receipt_semantics，不输出材料正文或profile路径。
+事件的sequence/previous/hash/request/hwb_sources格式和哈希计算不变；版本包头不参与事件hash。
+
+旧version=1仅在**整条日志完全没有receipt/confirm_receipt**时允许读取；读操作及幂等重试不改文件。
+下一次正常apply在原sync.lock内写version=2包头并追加新事件，原事件逐项不变、原head仍为新事件previous，
+既有state/远端pool_head仍在同一祖先链中。不能为了升级删除事件、改旧hash、清空state或换新池冒充同目标接续。
+
+含任一receipt/confirm_receipt的v1（包括cc473/51192写出的旧包头）一律拒绝自动重放/写入，
+不能仅凭actor、存在confirm或换包头就推定历史安全；本轮不提供自动重签/重建旧池的迁移命令。
+真实生产是否存在这种日志由总控检查，开发者没有读取生产pool作存在/不存在断言。
+由总控独立验收后制定并执行以下迁移边界：
+
+1. 暂停原展示run、等在途结束并持原sync.lock，备份脚本、pool/state/control及已发布清单和原链接；不复制.env。
+   记录原pool文件摘要、每条事件hash、最终head以及state和远端记录的head/原消息ID。
+2. 先查旧生产程序固定SHA与receipt真实语义；逐条审计声明、独立确认、审批、材料版本、review/close因果。
+   旧“receipt直接接单”历史不能静默当新声明语义；不能证明安全的close/原材料缺失时保持阻断并上报。
+3. 只有已证明整链符合新声明/确认语义且经独立审查的候选，才可在**隔离副本**验证包头迁移：
+   仅明确标注version=2和上述语义，保持全部events、事件hash和head逐字节内容相同；新代码重放/verify必须通过，
+   并比较原ID、原投递head祖先关系及所有当前投影。失败时保留原件和反例，不修改事件过测。
+4. 不可复核的旧链没有本轮自动迁移路径，须另行上报总控形成审核方案；全新pool会被旧state/远端head拒绝，
+   不允许清空日志/删除远端记录/更改目标来绕过。通过的离线迁移仍须总控确认后按同锁备份原子安装，真实Discord读回另验。
+   旧程序不识别v2；不能只回滚脚本或用旧备份覆盖已发布新head的链，须先审核与当前远端锚点一致的回滚方案。
+
+以上是总控安全迁移验收要求，不代表已执行生产迁移，也不声称任意旧pool可无缝升级。
 
 仅discover/inspection/receipt允许worker环境；其他操作沿用require_controller，拒绝Codex/Claude标记及HWB祖先链。
 这是同UID防误用与审计边界，actor/引用不是身份认证或数字签名。
@@ -442,7 +472,7 @@ gateway/profile_routing.py及gateway/platforms/base.py负责inbound profile匹�
 scripts/run_tests.sh tests/scripts/test_dev_progress_board.py \
   tests/scripts/test_dev_progress_review.py tests/scripts/test_dev_progress_pool.py \
   tests/scripts/test_dev_progress_cards.py tests/scripts/test_dev_progress_findings.py \
-  tests/scripts/test_dev_progress_thread_layout.py
+  tests/scripts/test_dev_progress_thread_layout.py tests/scripts/test_dev_progress_review_boundaries.py
 python scripts/check --staged
 ```
 
@@ -492,6 +522,11 @@ state丢失后恢复原pool及总览分页ID与最大页数，内容缩短后标
 首发未提交批次通过发布协议标记区分，可按原marker接续；页面/root响应丢失可读回原ID，不能替换原历史。
 缩页保留退役页及原清单；相同映射和内容重跑不新增清单或改写消息。
 无清单的旧版使用入口和n/N计数验证完整性后升级；无法证明完整的旧历史须从备份恢复，不按现有任务数猜缺页。
+普通无marker文字（包括任何窗口内的“HWB发布清单：”或假页号）不参与清单/legacy证据，不能阻断同步。
+声明受控marker的记录仍须核验作者、完整正文/摘要和用途频道；归属冲突不能当普通文字忽略。
+所有可信叶子和中间节点即使失去root也核验原key/ID/channel，不能降为“没有清单”；仅缺root且原页面齐全时可按原ID续提交。
+受控总览/入口/目录/上一页中的原导航链接均在写前核对，不访问链接指向的网络位置。
+state与旧入口/整类页面同时丢失时，幸存总览正文/Embed或目录中的原链接仍是原ID证据，不能补造新卡或自动搬迁旧父频道布局。
 
 部署仍由总控独立执行。七个Python模块必须一起安装；不改cron、gateway或运维profile。
 真实验收需读回message.embeds并核对原ID、中文分页及权限；再次同步确认零写入。

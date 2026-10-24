@@ -61,7 +61,7 @@ def restore_windows(board):
             board.api.thread(old["id"], "", create=False)
             key, _ = window_identity(board, role)
             if (board.state["messages"].get(key, {}).get("id") or
-                    any("[hwb-board:" in m.get("content", "") for m in board.api.history(old["id"]))):
+                    any(re.search(r"\[hwb-board:[0-9a-f]{24}\]", m.get("content", "")) for m in board.api.history(old["id"]))):
                 raise RuntimeError("未完成登记与已有历史冲突，不能补造窗口标记")
             found[role] = dict(old)
         else:
@@ -149,14 +149,16 @@ def validate(board):
     nodes, roots = {}, []
     for message in history:
         content = message.get("content", "")
-        if not content.startswith(PREFIX):
+        if not content.startswith(PREFIX) or not re.search(r"\[hwb-board:[0-9a-f]{24}\]", content):
             continue
-        if message.get("channel_id") != board.board_channels.get("recovery"):
+        if message.get("author", {}).get("id") != board.api.bot or message.get("channel_id") != board.board_channels.get("recovery"):
             raise RuntimeError("发布清单必须位于已登记恢复窗口")
         try:
             payload = json.loads(content[len(PREFIX):].split("\n", 1)[0])
         except (ValueError, TypeError) as exc:
             raise RuntimeError("发布清单格式损坏") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("发布清单必须为对象")
         hashed = digest(payload)
         key = "delivery:" + hashed
         expected = message_content(key, PREFIX + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
@@ -177,24 +179,74 @@ def validate(board):
         entries = walk(nodes, root, set())
         if len(entries) != root.get("count") or len({e["key"] for e in entries}) != len(entries):
             raise RuntimeError("发布清单数量冲突")
-        for entry in entries:
-            key, mid = entry["key"], entry["id"]
-            channel = page_channel(board, key)
-            message = by_id.get(mid)
-            marker = f"`[hwb-board:{digest(key)[:24]}]`"
-            if (not page_key(key) or not message or not channel or message.get("channel_id") != channel or entry.get("channel") != channel
-                    or message.get("author", {}).get("id") != board.api.bot
-                    or not message.get("content", "").endswith(marker)):
-                raise RuntimeError("已发布页面历史缺失或归属冲突，禁止重建")
-            if key in recovered and recovered[key]["id"] != mid:
-                raise RuntimeError("发布清单页面映射冲突")
-            old = board.state["messages"].get(key, {})
-            if old.get("id") and (old["id"] != mid or old.get("channel") != channel):
-                raise RuntimeError("发布清单与本地映射冲突")
-            recovered[key] = {"id": mid, "channel": channel, "hash": digest(message["content"])}
+    # An orphan leaf is still immutable evidence of original IDs. Parents are
+    # written after their children, so a dangling orphan branch is history loss too.
+    for _, node in nodes.values():
+        for entry in walk(nodes, node, set()):
+            restore_entry(board, entry, by_id, recovered)
     board.state["messages"].update(recovered)
-    if not roots:
-        validate_legacy(history)
+    controlled = controlled_pages(board, history)
+    validate_navigation(board, controlled)
+    if not nodes:
+        validate_legacy(controlled)
+
+
+def restore_entry(board, entry, by_id, recovered):
+    if not isinstance(entry, dict) or set(entry) != {"key", "id", "channel"} or not all(isinstance(v, str) for v in entry.values()):
+        raise RuntimeError("发布清单页面格式无效")
+    key, mid = entry["key"], entry["id"]
+    channel = page_channel(board, key)
+    message = by_id.get(mid)
+    marker = f"`[hwb-board:{digest(key)[:24]}]`"
+    if (not page_key(key) or not message or not channel or message.get("channel_id") != channel or entry["channel"] != channel
+            or message.get("author", {}).get("id") != board.api.bot or not message.get("content", "").endswith(marker)):
+        raise RuntimeError("已发布页面历史缺失或归属冲突，禁止重建")
+    if key in recovered and recovered[key]["id"] != mid:
+        raise RuntimeError("发布清单页面映射冲突")
+    old = board.state["messages"].get(key, {})
+    if old.get("id") and (old["id"] != mid or old.get("channel") != channel):
+        raise RuntimeError("发布清单与本地映射冲突")
+    recovered[key] = {"id": mid, "channel": channel, "hash": digest(message["content"])}
+
+
+def controlled_pages(board, history):
+    count = max([len(history), board.state.get("overview_pages", 0), *board.state.get("pool_pages", {}).values()])
+    keys = {"overview", "pool:entry", *board.state["messages"]}
+    keys.update(f"pool:{kind}:{n}" for kind in KINDS for n in range(1, count + 1))
+    keys.update(f"overview:page:{n}" for n in range(1, count + 1))
+    markers = {digest(key)[:24]: key for key in keys if page_key(key)}
+    found, seen = {}, set()
+    for message in history:
+        content = message.get("content", "")
+        tokens = re.findall(r"\[hwb-board:([0-9a-f]{24})\]", content)
+        matched = [markers[token] for token in tokens if token in markers]
+        if not matched:
+            continue
+        key = matched[0]
+        if (len(tokens) != 1 or key in seen or message.get("author", {}).get("id") != board.api.bot
+                or message.get("channel_id") != page_channel(board, key) or not content.endswith(f"`[hwb-board:{tokens[0]}]`")):
+            raise RuntimeError("受控导航页面标记、作者或频道冲突")
+        found[message["id"]] = (key, message)
+        seen.add(key)
+    return found
+
+
+def validate_navigation(board, controlled):
+    link = re.compile(r"\[([^\]\n]+)\]\(https://discord\.com/channels/([0-9]+)/([0-9]+)/([0-9]+)\)")
+    labels = re.compile(r"问题发现(?:入口|窗口)(?:（公共窗口）)?|全部\s+\d+\s+任务.*|全部任务.*|问题\s*/\s*任务\s*/\s*执行窗口|(?:问题|任务|HWB窗口|目录)\d+|上一页")
+    for _, message in controlled.values():
+        texts = [(message.get("content", ""), False)]
+        for embed in message.get("embeds", []):
+            texts.append((embed.get("description", ""), False))
+            texts.extend((f.get("value", ""), f.get("name") in {"全部任务", "问题与任务入口", "分页目录", "分页导航"}) for f in embed.get("fields", []))
+        for text, navigation in texts:
+            links = [m for m in link.finditer(text) if navigation or labels.fullmatch(m[1])]
+            if navigation and not links:
+                raise RuntimeError("受控导航缺少原始页面链接")
+            for ref in links:
+                target = controlled.get(ref[4])
+                if ref[2] != board.guild_id or not target or target[1].get("channel_id") != ref[3]:
+                    raise RuntimeError("原导航指向的页面缺失或目标冲突，禁止替换历史")
 
 
 def walk(nodes, node, ancestors):
@@ -202,8 +254,13 @@ def walk(nodes, node, ancestors):
         if set(node) != {"entries"} or not isinstance(node["entries"], list):
             raise RuntimeError("发布清单叶子无效")
         return node["entries"]
+    allowed = {"children"} if "version" not in node else {"version", "guild", "channel", "discovery", "recovery", "count", "children"}
+    if set(node) != allowed or not isinstance(node["children"], list) or not node["children"]:
+        raise RuntimeError("发布清单分支无效")
     result = []
-    for ref in node.get("children", []):
+    for ref in node["children"]:
+        if not isinstance(ref, dict) or set(ref) != {"id", "hash"} or not isinstance(ref["id"], str) or not isinstance(ref["hash"], str):
+            raise RuntimeError("发布清单分片引用无效")
         hashed = ref["hash"]
         if hashed in ancestors or hashed not in nodes or nodes[hashed][0] != ref["id"]:
             raise RuntimeError("发布清单分片缺失或循环")
@@ -211,19 +268,9 @@ def walk(nodes, node, ancestors):
     return result
 
 
-def validate_legacy(history):
+def validate_legacy(controlled):
     """Legacy n/N counters and the successful entry are evidence, never guessed IDs."""
-    known_ids = {m["id"] for m in history}
-    for message in history:
-        if not message.get("content", "").endswith(f"`[hwb-board:{digest('overview')[:24]}]`"):
-            continue
-        for embed in message.get("embeds", []):
-            for item in embed.get("fields", []):
-                if item.get("name") == "全部任务":
-                    links = re.findall(r"https://discord.com/channels/[0-9]+/[0-9]+/([0-9]+)", item.get("value", ""))
-                    if not links or any(mid not in known_ids for mid in links):
-                        raise RuntimeError("旧总览目录指向的历史分页缺失")
-    contents = [m.get("content", "") for m in history]
+    contents = [m.get("content", "") for _, m in controlled.values()]
     published = any(c.startswith("问题发现入口\n任务池记录：") for c in contents)
     initial = not published and not any(c.startswith("问题 ") for c in contents) and any("\n发布协议：1" in c for c in contents)
     for kind in KINDS:

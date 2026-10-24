@@ -18,6 +18,8 @@ from dev_progress_evidence import versions
 STATES = {"unverified": "待核实", "ready": "待分派", "executing": "执行中",
           "awaiting_review": "待验收", "closed": "关闭", "duplicate": "重复", "deferred": "暂不处理"}
 INGRESS = {"discover", "inspection", "receipt"}
+POOL_VERSION = 2
+RECEIPT_SEMANTICS = "claims-controller-confirmed-v1"
 PAYLOAD_FIELDS = {
     "discover": "source source_ref project fingerprint title severity observed_at",
     "inspection": "source_ref project observed_at summary",
@@ -82,12 +84,26 @@ def window_url(value):
         raise ValueError("执行窗口snowflake无效")
 
 
+def journal_format(obj):
+    if (not isinstance(obj, dict) or type(obj.get("version")) is not int or obj["version"] not in {1, POOL_VERSION}
+            or not isinstance(obj.get("events"), list)):
+        raise ValueError("问题任务池格式无效")
+    if obj["version"] == 1:
+        for event in obj["events"]:
+            request = event.get("request") if isinstance(event, dict) else None
+            if isinstance(request, dict) and request.get("action") in {"receipt", "confirm_receipt"}:
+                raise ValueError("旧池回执语义不明确；保留原链与投递head，须总控审计迁移")
+    elif obj.get("receipt_semantics") != RECEIPT_SEMANTICS:
+        raise ValueError("未知回执语义版本，停止而非推测")
+    return obj["version"]
+
+
 class Pool:
-    def __init__(self, path):
+    def __init__(self, path, home=None):
         self.path = Path(path)
-        obj = json.loads(self.path.read_text(encoding="utf-8-sig")) if self.path.exists() else {"version": 1, "events": []}
-        if not isinstance(obj, dict) or obj.get("version") != 1 or not isinstance(obj.get("events"), list):
-            raise ValueError("问题任务池格式无效")
+        self.home = Path(home) if home is not None else None
+        obj = json.loads(self.path.read_text(encoding="utf-8-sig")) if self.path.exists() else {"version": POOL_VERSION, "receipt_semantics": RECEIPT_SEMANTICS, "events": []}
+        self.format_version = journal_format(obj)
         self.events, self.head = [], review.ZERO
         self.data = {"issues": {}, "tasks": {}, "windows": {}, "inspections": []}
         for event in obj["events"]:
@@ -142,7 +158,7 @@ class Pool:
         # Same lock as sync: no close can race with a delivery snapshot.
         with (self.path.parent / "sync.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            loaded = Pool(self.path)
+            loaded = Pool(self.path, home=home)
             state_path = self.path.parent / "state.json"
             state = json.loads(state_path.read_text(encoding="utf-8-sig")) if state_path.exists() else {}
             loaded.validate_anchor(state)
@@ -159,7 +175,8 @@ class Pool:
             loaded.reduce(event)
             if request["action"] == "close" and loaded.preflight(home, request) != sources:
                 raise ValueError("执行材料在关单提交前变化，请重新核验")
-            atomic_json(self.path, {"version": 1, "events": loaded.events + [event]})
+            atomic_json(self.path, {"version": POOL_VERSION, "receipt_semantics": RECEIPT_SEMANTICS, "events": loaded.events + [event]})
+            loaded.format_version = POOL_VERSION
             loaded.events.append(event)
             loaded.head = event["hash"]
             self.__dict__.update(loaded.__dict__)
@@ -208,6 +225,8 @@ class Pool:
         if not checked or checked["work_hash"] != self.work_hash(tid):
             return False
         try:
+            if any("source_hashes" in source for source in checked["hwb_sources"].values()):
+                return self.home is not None and self.preflight(self.home, {"action": "review", "payload": {"task_id": tid}}) == checked["hwb_sources"]
             for wid, source in checked["hwb_sources"].items():
                 if "native" in source and source["native"] != versions(self.path.parent, task["receipts"][wid]["materials"]):
                     return False
@@ -460,7 +479,7 @@ def main():
     sub = commands.add_parser("apply", help="原子登记一个JSON请求；无网络调用")
     sub.add_argument("--file", required=True, type=Path)
     args = parser.parse_args()
-    log = Pool(args.state_dir / "pool.json")
+    log = Pool(args.state_dir / "pool.json", home=args.home)
     if args.command == "apply":
         request = json.loads(args.file.read_text(encoding="utf-8-sig"))
         event = log.apply(args.home, request)
@@ -473,7 +492,8 @@ def main():
         return
     state = args.state_dir / "state.json"
     log.validate_anchor(json.loads(state.read_text(encoding="utf-8-sig")) if state.exists() else {})
-    output = log.snapshot() if args.command == "snapshot" else {"head": log.head, "events": len(log.events), "counts": log.counts([])}
+    output = log.snapshot() if args.command == "snapshot" else {"head": log.head, "events": len(log.events), "counts": log.counts([]),
+        "format_version": log.format_version, "receipt_semantics": RECEIPT_SEMANTICS if log.format_version == POOL_VERSION else "legacy-without-receipts"}
     print(json.dumps(output, ensure_ascii=False, indent=2))
 
 
