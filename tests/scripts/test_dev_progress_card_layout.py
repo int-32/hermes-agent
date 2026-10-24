@@ -40,8 +40,8 @@ class CardLayoutTests(unittest.TestCase):
         detail = self.api.messages[saved["tasks"][row["id"]]["message_id"]]
         fields = values(detail["embeds"][0])
         self.assertEqual(fields["三层验收"].splitlines(), row["acceptance"].split("｜"))
-        self.assertEqual(fields["总控未完成说明"].splitlines(), ["开发：本地通过；", "合入：等待审查。", "上线：待总控验证"])
-        self.assertEqual(fields["下一步 / 阻塞"].splitlines(), ["等依赖；", "需总控确认。", "然后继续"])
+        self.assertEqual(fields["总控未完成说明"].splitlines(), ["开发：本地通过", "合入：等待审查", "上线：待总控验证"])
+        self.assertEqual(fields["下一步 / 阻塞"].splitlines(), ["等依赖", "需总控确认", "然后继续"])
         self.assertIn("三层验收：" + row["acceptance"], detail["content"])
         self.assertEqual(saved["tasks"][row["id"]]["stage"]["acceptance"], row["acceptance"])
 
@@ -58,17 +58,17 @@ class CardLayoutTests(unittest.TestCase):
         task_cards = cards.pool_task_cards(self.f.log, {}, self.api.guild_id, [])
         task_values = {k: v for embed in task_cards for k, v in values(embed).items()}
         self.assertEqual(task_values["业务状态"].splitlines(), ["执行中", "尚未关单"])
-        self.assertEqual(task_values["登记与批准"].splitlines(), ["来源：总控批准目标", "项目：project", "批准：approval:goal"])
-        self.assertEqual(task_values["执行者 / 窗口"].splitlines()[:2], ["Owner：ops", "状态：已接单"])
+        self.assertEqual(task_values["登记与批准"].splitlines(), ["总控批准目标", "project", "approval:goal"])
+        self.assertEqual(task_values["执行者 / 窗口"].splitlines()[:2], ["ops", "已接单"])
         url = self.f.log.data["windows"][wid]["url"]
         self.assertIn(f"[已核实执行窗口]({url})", task_values["执行者 / 窗口"].splitlines())
-        self.assertEqual(task_values["阻塞回传 · 待总控核实"].splitlines(), ["缺少材料；", "等待授权。", "不能自行操作"])
+        self.assertEqual(task_values["阻塞回传 · 待总控核实"].splitlines(), ["缺少材料", "等待授权", "不能自行操作"])
         issue = cards.issue_cards(self.f.log, {}, self.api.guild_id)[0]
         issue_values = values(issue)
-        self.assertEqual(issue_values["状态 / 严重级别"].splitlines(), ["严重级别：P2", "状态：待核实"])
+        self.assertEqual(issue_values["状态 / 严重级别"].splitlines(), ["P2 ", " 待核实"])
         self.assertEqual(self.f.log.data["issues"][iid]["state"], "unverified")
         self.assertEqual(issue_values["Owner"], "ops")
-        self.assertEqual(issue_values["来源与观察"].splitlines()[:2], ["来源：运维巡检", "项目：project"])
+        self.assertEqual(issue_values["来源与观察"].splitlines()[:2], ["project ", " 运维巡检"])
 
     def test_new_and_old_closed_acceptance_renderings_remain_read_only_and_exact(self):
         closed = dict(task("已完成"), closed=True, control_head="close-layout",
@@ -114,7 +114,7 @@ class CardLayoutTests(unittest.TestCase):
     def test_prose_breaks_preserve_explicit_lines_urls_and_utf16_budget_without_fixed_width_wrapping(self):
         url = "https://example.invalid/evidence?a=1;b=2"
         text = "开发：待核验；合入：待总控。\n上线：待验证\n" + url
-        self.assertEqual(cards.clip(text, 500, multiline=True), "开发：待核验；\n合入：待总控。\n上线：待验证\n" + url)
+        self.assertEqual(cards.clip(text, 500, multiline=True), "开发：待核验\n合入：待总控。\n上线：待验证\n" + url)
         self.assertEqual(cards.clip("长句" * 80, 500, multiline=True), "长句" * 80)
         for limit in (40, 150, 300, 500, 900, 1024):
             clipped = cards.clip("😀开发完成；合入主线。上线待验收\n" * 200, limit, multiline=True)

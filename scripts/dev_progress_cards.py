@@ -19,27 +19,36 @@ def units(value):
     return len(value.encode("utf-16-le")) // 2
 
 
-def clip(value, limit=180, *, multiline=False):
+def clip(value, limit=180, *, multiline=False, stages=False):
     value = str(value)
     if multiline:
-        value = "\n".join(safe_label(line, max(len(value), limit)) for line in value.splitlines())
+        limit = min(limit, units(clip(value, limit)))
+        # U+2028 remains whitespace for safe_label's whole-text secret matcher,
+        # while surviving its CR/LF flattening. Restore line breaks only afterward.
+        value = safe_label(value.replace("\r", "\u2028").replace("\n", "\u2028"), max(len(value), limit)).replace("\u2028", "\n")
+        if stages:
+            value = re.sub(r"｜(?=(?:合入主线|上线验收)：)", "\n", value)
         # Break prose at existing boundaries, leaving URLs and their punctuation intact.
         value = "".join(part if part.startswith(("https://", "http://")) else
-                        re.sub(r"([；;。])(?=[^\n])", r"\1\n", part).replace("｜", "\n")
+                        re.sub(r"[；;。](?=[^\n])", "\n", part).replace("｜", "\n")
                         for part in re.split(r"(https?://\S+)", value))
     else:
         value = safe_label(value, max(len(value), limit))
     value = value.replace("[", "（").replace("]", "）")
     if units(value) <= limit:
         return value
-    suffix = "…\n完整内容见材料引用/总控记录" if multiline else "…"
+    hint = "…\n完整内容见材料引用/总控记录"
+    suffix = hint if multiline and units(hint) <= limit else "…"
     result, count = [], 0
     for char in value:
         count += units(char)
         if count > limit - units(suffix):
             break
         result.append(char)
-    return "".join(result) + suffix
+    prefix = "".join(result)
+    if multiline and units(prefix) + units(suffix) < limit:
+        suffix = "…" + suffix  # Keep the old packing weight at a surrogate-pair boundary.
+    return prefix + suffix
 
 
 def field(name, value):
@@ -127,7 +136,7 @@ def hwb_detail(task, guild_id=None, thread_id=None):
     fields = [field("业务状态", task["status"]), field("执行者", clip(task["executor"], 80) + " · HWB"),
               field("目标 / 验收标准", clip(task.get("objective", "未独立登记目标；以总控任务书为准"), 220) + "\n" + clip(task.get("acceptance_criteria", "验收标准未独立登记；不从worker自评推断"), 220)),
               field("关键进展", clip(task["progress"], 400, multiline=True)), field("下一步 / 阻塞", clip(next_step, 400, multiline=True)),
-              field("三层验收", clip(task["acceptance"], 900, multiline=True)), field("总控记录", clip(approval, 400)),
+              field("三层验收", clip(task["acceptance"], 900, multiline=True, stages=True)), field("总控记录", clip(approval, 400)),
               field("材料引用", clip(task["evidence"], 300)), field("源记录更新", clip(task["updated"], 60))]
     if thread_id and guild_id:
         fields.append(field("执行窗口", f"[HWB状态窗口](https://discord.com/channels/{guild_id}/{thread_id})\n原生会话链接未独立登记"))
@@ -141,7 +150,7 @@ def validate_closed_embed(task, latest, detail):
         return  # Original pure-text certificates remain valid and read-only.
     embeds = detail["embeds"]
     expected = {"业务状态": (latest["status"],),
-                "三层验收": (clip(latest["acceptance"], 900), clip(latest["acceptance"], 900, multiline=True)),
+                "三层验收": (clip(latest["acceptance"], 900), clip(latest["acceptance"], 900, multiline=True, stages=True)),
                 "总控记录": (clip(task["control_event"]["approval_ref"], 400),)}
     if len(embeds) != 1 or embeds[0].get("footer", {}).get("text") != "HWB任务：" + task["id"]:
         raise RuntimeError("关闭Embed任务身份冲突")
@@ -187,7 +196,7 @@ def window_fields(pool, task, targets, guild_id):
     for wid in task["window_ids"]:
         window = pool.data["windows"][wid]
         receipt = task["receipts"].get(wid)
-        value = "Owner：" + clip(window["executor"], 80) + "\n状态：" + ("已接单" if receipt else "拟分派，尚无接单证据")
+        value = clip(window["executor"], 80) + "\n" + ("已接单" if receipt else "拟分派，尚无接单证据")
         if window.get("url"):
             value += "\n[" + ("已核实执行窗口" if receipt else "登记链接 · 待核实") + "](" + window["url"] + ")"
         else:
@@ -223,7 +232,7 @@ def pool_task_cards(pool, targets, guild_id, hwb_tasks):
         for key, name in (("development", "开发完成"), ("merge", "合入主线"), ("release", "上线验收")):
             check = checked["checks"][key] if checked else {"status": "unverified"}
             label = "旧验收已失效 / 待重验" if stale else {"passed": "已核验", "unverified": "未核验", "not_applicable": "不适用"}[check["status"]]
-            checks.append(name + "：" + label + ("\n说明：" + clip(check["reason"], 150, multiline=True) if check.get("reason") else ""))
+            checks.append(name + "：" + label + ("\n" + clip(check["reason"], 150, multiline=True) if check.get("reason") else ""))
         fields.append(field("三层验收", "\n".join(checks)))
         fields.extend(window_fields(pool, task, targets, guild_id))
         for wid in task["window_ids"]:
@@ -233,12 +242,13 @@ def pool_task_cards(pool, targets, guild_id, hwb_tasks):
                 fields.append(field("待总控决策", "关闭后HWB状态冲突；不自动重开或停止执行者"))
             elif row and row["status"] in {"待决策", "失败"}:
                 fields.append(field("HWB需关注", row["status"] + "\n" + clip(row["phase"], 300, multiline=True)))
-        fields.append(field("登记与批准", "来源：" + source + "\n项目：" + clip(task["project"], 60) + "\n批准：" + clip(task["approval_ref"], 300)))
+        fields.append(field("登记与批准", source + "\n" + clip(task["project"], 60) + "\n" + clip(task["approval_ref"], 300)))
         fields.append(field("源记录更新", clip(task["updated"], 50)))
         for iid in task["issue_ids"]:
             fields.append(field("关联问题", iid))
         color_status = "待决策" if not task["closed"] and any(r.get("blocker") for r in task["receipts"].values()) else status
-        result.extend(split_card(task["title"], fields, description="任务：" + tid + "\n状态：" + status, status=color_status))
+        # Replace only the middle-dot glyph; keep its spaces and original packing budget.
+        result.extend(split_card(task["title"], fields, description="任务：" + tid + " \n " + status, status=color_status))
     return result
 
 
@@ -249,10 +259,10 @@ def issue_cards(pool, targets, guild_id):
         observation = next((o for o in issue["observations"] if o["source_ref"] == issue.get("latest_observation")), issue["observations"][-1])
         status = STATUS[pool.issue_status(iid)]
         owners = sorted({pool.data["windows"][wid]["executor"] for tid in issue["task_ids"] for wid in pool.data["tasks"][tid]["window_ids"]})
-        fields = [field("状态 / 严重级别", "严重级别：" + issue["severity"] + "\n状态：" + status),
+        fields = [field("状态 / 严重级别", issue["severity"] + " \n " + status),
                   field("Owner", clip("、".join(owners) or "待总控分派", 200)),
                   field("处置 / 下一步", clip(issue["reason"], 300, multiline=True)),
-                  field("来源与观察", "来源：运维巡检\n项目：" + clip(issue["project"], 80) + "\n时间：" + clip(observation["observed_at"], 50) + f"\n观察：{len(issue['observations'])}次"),
+                  field("来源与观察", clip(issue["project"], 80) + " \n 运维巡检\n" + clip(observation["observed_at"], 50) + f"\n{len(issue['observations'])}次观察"),
                   field("材料引用", clip(observation["evidence"][0], 300))]
         if issue.get("duplicate_of"):
             fields.append(field("重复原问题", issue["duplicate_of"]))
@@ -262,7 +272,7 @@ def issue_cards(pool, targets, guild_id):
             fields.append(field("关联任务", tid))
             fields.extend(window_fields(pool, pool.data["tasks"][tid], targets, guild_id)[:1])
         color_status = "待决策" if issue["severity"] in {"P0", "P1"} and (issue.get("escalation_pending") or status not in {"关闭", "重复", "暂不处理"}) else status
-        result.extend(split_card(issue["title"], fields, description="问题：" + iid + "\n严重级别：" + issue["severity"] + "\n状态：" + status, status=color_status))
+        result.extend(split_card(issue["title"], fields, description="问题：" + iid + " \n " + issue["severity"] + " \n " + status, status=color_status))
     for run in pool.data["inspections"]:
         result.append(make_card("巡检回传 · " + clip(run["source_ref"], 45),
             [field("实际结果", clip(run["summary"], 500)), field("范围 / 时间", clip(run["project"], 100) + "\n" + clip(run["observed_at"], 50)),

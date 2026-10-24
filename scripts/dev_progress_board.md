@@ -473,7 +473,8 @@ scripts/run_tests.sh tests/scripts/test_dev_progress_board.py \
   tests/scripts/test_dev_progress_review.py tests/scripts/test_dev_progress_pool.py \
   tests/scripts/test_dev_progress_cards.py tests/scripts/test_dev_progress_findings.py \
   tests/scripts/test_dev_progress_thread_layout.py tests/scripts/test_dev_progress_review_boundaries.py \
-  tests/scripts/test_dev_progress_navigation.py tests/scripts/test_dev_progress_card_layout.py
+  tests/scripts/test_dev_progress_navigation.py tests/scripts/test_dev_progress_card_layout.py \
+  tests/scripts/test_dev_progress_card_boundaries.py
 python scripts/check --staged
 ```
 
@@ -489,7 +490,9 @@ python scripts/check --staged
 待核实/待分派/待验收为琥珀色，执行中为蓝色，关闭/重复/暂不处理为灰色；颜色不提升业务结论。
 
 Embed计数将问题、任务、执行窗口各列一行；HWB三层验收按开发/合入/上线分别列行。
-总控说明和阻塞按已有换行、阶段分隔符、分号或句号分行，不按固定字数强制换行；来源、Owner、状态及链接纵向展示。
+总控说明和阻塞先整段沿用safe_label跨行键值脱敏，再保留换行；以换行替换阶段分隔符、分号或句号，不额外增字、不按固定字数换行。
+HWB验收先按系统开发/合入/上线边界分开，再处理各段URL，避免证据URL吞掉后续阶段；原始证据不改。
+来源、Owner、状态及链接纵向展示，不增加重复标签；原中点两旁空格保留，只替换分隔字符，字段/描述预算不比旧同事实值增长。
 分行纳入原UTF-16限额，超长摘要明示“完整内容见材料引用/总控记录”，原材料及content不改。
 旧归档验收卡保持只读；验收展示仅允许原单行或同一原验收生成的精确分行版本，事实冲突/重复字段仍拒绝。
 
