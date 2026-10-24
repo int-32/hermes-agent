@@ -473,7 +473,7 @@ scripts/run_tests.sh tests/scripts/test_dev_progress_board.py \
   tests/scripts/test_dev_progress_review.py tests/scripts/test_dev_progress_pool.py \
   tests/scripts/test_dev_progress_cards.py tests/scripts/test_dev_progress_findings.py \
   tests/scripts/test_dev_progress_thread_layout.py tests/scripts/test_dev_progress_review_boundaries.py \
-  tests/scripts/test_dev_progress_navigation.py
+  tests/scripts/test_dev_progress_navigation.py tests/scripts/test_dev_progress_card_layout.py
 python scripts/check --staged
 ```
 
@@ -487,6 +487,11 @@ python scripts/check --staged
 均通过Discord REST的`embeds`数组投递rich embeds。不是给content加emoji；不依赖网页或交互handler。
 卡片字段全部`inline:false`，移动端纵向阅读。状态同时用颜色与文字，待决策/失败及高严重观察为红色，
 待核实/待分派/待验收为琥珀色，执行中为蓝色，关闭/重复/暂不处理为灰色；颜色不提升业务结论。
+
+Embed计数将问题、任务、执行窗口各列一行；HWB三层验收按开发/合入/上线分别列行。
+总控说明和阻塞按已有换行、阶段分隔符、分号或句号分行，不按固定字数强制换行；来源、Owner、状态及链接纵向展示。
+分行纳入原UTF-16限额，超长摘要明示“完整内容见材料引用/总控记录”，原材料及content不改。
+旧归档验收卡保持只读；验收展示仅允许原单行或同一原验收生成的精确分行版本，事实冲突/重复字段仍拒绝。
 
 首页分别显示活动问题、任务、执行窗口计数，优先显示HWB待决策/失败、显式阻塞回传和P0/P1问题。
 已关联pool的HWB窗口仍参与关注项检测，不因任务去重而隐藏待决策。

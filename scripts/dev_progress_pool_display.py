@@ -81,7 +81,7 @@ def sync_pool(board, pool, tasks, targets):
         board.read_owned("pool:entry", channel, cached["id"])
     counts = active_counts(tasks, pool)
     attention = attention_fields([], targets, pool, board.guild_id)
-    entry_card = make_card("问题发现入口", [field("独立计数", f"问题 {counts['issues']}｜任务 {counts['tasks']}｜执行窗口 {counts['windows']}"),
+    entry_card = make_card("问题发现入口", [field("独立计数", f"问题 {counts['issues']}\n任务 {counts['tasks']}\n执行窗口 {counts['windows']}"),
         *attention[:2],
         field("运维巡检", "登记实际观察与证据；日志异常先待核实。无问题也可如实回传。"),
         field("批准目标", "总控先定义目标、范围、验收；接单后执行，回传后总控验收。"),
