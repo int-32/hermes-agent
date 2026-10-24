@@ -8,7 +8,7 @@
 ## 运行与部署
 
 在所属profile的专用部署目录放置 `dev_progress_board.py`、`dev_progress_review.py`、
-`dev_progress_pool.py`、`dev_progress_pool_display.py` 和 `sync.sh`。
+`dev_progress_pool.py`、`dev_progress_pool_display.py`、`dev_progress_cards.py` 和 `sync.sh`。
 例如 `PROFILE_HOME="${HERMES_HOME:-$HOME/.hermes}"`，`BOARD_ROOT="$PROFILE_HOME/scripts/dev-progress-board"`。
 把以下入口模板的四个占位值替换为本地实际配置；目标ID不是凭据，bot token仍只从原profile的`.env`内存读取：
 
@@ -50,7 +50,7 @@ hermes cron status
 先从旧部署的GUILD/CHANNEL常量私下核对原授权目标，保持home、state目录及两项ID不变。
 暂停现有cron，等待已开始的run完成，再持有部署目录的`sync.lock`完成备份和原子安装；不能只暂停就假定无在途同步。
 只备份本任务Python脚本、sync.sh、state.json和存在的control.json/pool.json，不复制.env或修改旧证据。
-安装四个已复审Python脚本，并按上方模板为原入口增加两项ID及`"$@"`；不要新建重复cron。
+安装五个已复审Python脚本，并按上方模板为原入口增加两项ID及`"$@"`；不要新建重复cron。
 
 ```sh
 PROFILE_HOME="${HERMES_HOME:-$HOME/.hermes}"
@@ -312,7 +312,7 @@ pool_cli verify
 | `task` | id、source、project、title、objective、scope、acceptance、approval_ref、issue_ids列表 | 总控 |
 | `link` | issue_id、task_id；多对多，关联不确认问题 | 总控 |
 | `window` | task_id、kind(native/hwb)、profile、session_id、executor；native必需url；hwb必需binding，可另给url | 总控 |
-| `receipt` | task_id、window_id、kind(accepted/report)、progress、next_step；actor匹配executor，report不能跳过接单 | 对应执行者 |
+| `receipt` | task_id、window_id、kind(accepted/report)、progress、next_step；可选blocker为显式阻塞回传；actor匹配executor，report不能跳过接单 | 对应执行者 |
 | `review` | task_id、approval_ref、checks（三层结构同上文） | 总控 |
 | `close` | task_id、approval_ref、reason、outcome(completed/cancelled)；验收满足，completed须全部窗口回传 | 总控 |
 | `reopen` | task_id、approval_ref、reason；重置本轮验收和接单，保留历史 | 总控 |
@@ -356,7 +356,7 @@ CLI检查结构、一致性、因果，不能证明证据语义；总控须读�
 gateway/profile_routing.py及gateway/platforms/base.py负责inbound profile匹配。配置存在不等于实接成功。
 本版不新增通信或调度器，不改变资产操作归属；缺少真实会话或文档路径由总控补齐。
 
-升级按前文暂停既有展示cron、等在途结束，持sync.lock备份并原子安装四个Python脚本。
+升级按前文暂停既有展示cron、等在途结束，持sync.lock备份并原子安装五个Python脚本。
 原state/control/历史证据原位保留；pool不存在表示尚无登记，首次apply才创建，不合成历史问题/验收。
 先在备份副本运行pool verify、原review verify、sync --dry-run，检查计数和原目标绑定；
 空pool保留旧dry-run列表格式，有pool事件时返回hwb_tasks/pool/counts对象。
@@ -368,10 +368,50 @@ gateway/profile_routing.py及gateway/platforms/base.py负责inbound profile匹�
 
 ```sh
 scripts/run_tests.sh tests/scripts/test_dev_progress_board.py \
-  tests/scripts/test_dev_progress_review.py tests/scripts/test_dev_progress_pool.py
+  tests/scripts/test_dev_progress_review.py tests/scripts/test_dev_progress_pool.py \
+  tests/scripts/test_dev_progress_cards.py
 python scripts/check --staged
 ```
 
 覆盖巡检去重/无问题、双来源、多对多/共享窗口、子进程CLI/并发、接单门槛、
 三层验收/新批准、原HWB契约、原子及投递回执丢失、分页、state/pool丢失拒绝。
 临时profile及FakeDiscord测试不代替真实接入、生产迁移或Discord读回。
+
+## Discord 原生 Embed 卡片
+
+固定总览、活动HWB线程详情、问题发现入口、问题/巡检回传、pool任务详情、窗口索引和目录分页，
+均通过Discord REST的`embeds`数组投递rich embeds。不是给content加emoji；不依赖网页或交互handler。
+卡片字段全部`inline:false`，移动端纵向阅读。状态同时用颜色与文字，待决策/失败及高严重观察为红色，
+待核实/待分派/待验收为琥珀色，执行中为蓝色，关闭/重复/暂不处理为灰色；颜色不提升业务结论。
+
+首页分别显示问题、任务、执行窗口计数，优先显示HWB待决策/失败、显式阻塞回传和P0/P1问题。
+已关联pool的HWB窗口仍参与关注项检测，不因任务去重而隐藏待决策。
+每条短标题、Owner、状态和已有窗口链接；原生链接未登记时明确标缺失，不把HWB状态thread冒充原生会话。
+首页显示数量、关注项数量和完整分页导航；问题按严重级别排序，全部任务目录保留每条任务。
+HWB缺少独立目标/验收标准时如实标未登记，不能从prompt或worker结论猜测。
+
+详情用字段突出目标/范围与验收、关键进展、下一步/阻塞、窗口及三层验收。
+长日志/长证据留原thread或源文档，卡片只给短引用；省略以`…`明示，完整材料仍可用snapshot/原证据读取。
+receipt可选`blocker`用于执行者明确回传阻塞（1至500字符）；不从progress/next_step关键词推断阻塞。
+新的无blocker回传可更新当前显示，原事件留在日志。它只是带证据的待核实回传，不自动批准、执行或关单。
+
+每消息最多10个Embed、合计6000字符；单Embed标题256、description4096、字段25个、字段名256/值1024、
+footer2048、author.name256；content仍最多2000字符。实现采用UTF-16计数保守覆盖emoji，发送前校验，
+超限拒绝而非发送400或截断恢复证据。正常卡片按最多12字段/3800字段字符拆续卡，消息最多3卡/4800卡片字符，
+预留页码和导航预算；任务总览页最多8项并按字符预算进一步拆分。分页显示页码/页数、记录数及上一页导航。
+依据：[Discord官方Message/Embed限制](https://github.com/discord/discord-api-docs/blob/main/developers/resources/message.mdx#embed-limits)。
+
+marker继续留在content，阶段快照和pool日志head格式不变；HWB四项关单恢复校验行留在折叠文本里。
+升级首次PATCH原总览/活动详情/原pool分页，复用原ID及thread；不重建历史，不改写阶段消息。
+已关单且归档的旧纯文本详情保持只读，不能为卡片化解归档；新的关闭Embed同时核对其业务状态、三层验收、
+批准引用与任务身份。显式reopen后才可按旧契约更新旧详情。历史里程碑继续纯文本追加。
+
+原`hash`继续绑定content，保留阶段证据兼容；另存`payload_hash`，覆盖content及规范化Embed内容。
+忽略Discord读回添加的type/proxy等只读元数据，省略inline:false与显式false等价，避免每轮重复PATCH。
+颜色/字段独立变化也会更新；没有内容变化时不POST/PATCH/PUT/DELETE。
+state丢失后恢复原pool及总览分页ID与最大页数，内容缩短后标记退役页，避免残留过期活动卡；
+已登记分页缺失、标记重复或归属冲突时停止，不能靠重建绕过恢复。
+
+部署仍由总控独立执行。新增文件必须随其余四个Python脚本一起安装；不改cron、gateway或运维profile。
+真实验收需读回message.embeds并核对原ID、中文分页及权限；再次同步确认零写入。
+旧纯文本迁移和无变化测试已覆盖，不代表真实Discord移动端视觉或当前bot的Embed权限已验收。

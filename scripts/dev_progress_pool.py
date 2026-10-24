@@ -24,7 +24,7 @@ PAYLOAD_FIELDS = {
     "task": "id source project title objective scope acceptance approval_ref issue_ids",
     "link": "issue_id task_id",
     "window": "task_id kind profile session_id executor binding url",
-    "receipt": "task_id window_id kind progress next_step",
+    "receipt": "task_id window_id kind progress next_step blocker",
     "review": "task_id approval_ref checks",
     "close": "task_id approval_ref reason outcome",
     "reopen": "task_id approval_ref reason",
@@ -345,6 +345,8 @@ def receipt(log, p, event):
         raise ValueError("未实际接单，不能跳过接单直接回传")
     for key in ("progress", "next_step"):
         text(p, key)
+    if "blocker" in p:
+        text(p, "blocker")
     task["receipts"][wid] = {**p, "at": event["at"], "evidence": event["request"]["evidence"], "event": event["hash"]}
     task["updated"] = event["at"]
 

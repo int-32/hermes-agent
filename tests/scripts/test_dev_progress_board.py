@@ -16,7 +16,10 @@ from unittest.mock import patch
 SPEC = importlib.util.spec_from_file_location(
     "dev_progress_board", Path(__file__).resolve().parents[2] / "scripts/dev_progress_board.py")
 board = importlib.util.module_from_spec(SPEC)
+sys.path.insert(0, str(Path(SPEC.origin).parent))
 SPEC.loader.exec_module(board)
+importlib.import_module("dev_progress_cards")
+sys.path.pop(0)
 TEST_GUILD = "100000000000000001"
 TEST_CHANNEL = "100000000000000002"
 
@@ -44,6 +47,8 @@ class FakeDiscord:
             self.next_id += 1
             message = {"id": str(self.next_id), "channel_id": channel,
                        "author": {"id": self.bot}, "content": body["content"], "pinned": False}
+            if "embeds" in body:
+                message["embeds"] = copy.deepcopy(body["embeds"])
             self.messages[message["id"]] = message
             if self.lose_reply:
                 self.lose_reply = False

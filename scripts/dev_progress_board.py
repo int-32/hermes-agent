@@ -392,9 +392,11 @@ class Board:
     def save(self):
         atomic_json(self.path, self.state)
 
-    def message(self, key, channel, text, receipt=None):
+    def message(self, key, channel, text, receipt=None, *, embeds=None):
+        from dev_progress_cards import payload_fingerprint, validate_payload
         marker = f"[hwb-board:{digest(key)[:24]}]"
         content = message_content(key, text, receipt)
+        validate_payload(content, embeds or [])
         entry = self.state["messages"].setdefault(key, {})
         existing = None
         if entry.get("id"):
@@ -408,17 +410,21 @@ class Board:
                 raise RuntimeError("发现重复标记，停止而非继续发送")
             existing = found[0] if found else None
         body = {"content": content, "allowed_mentions": {"parse": []}}
+        if embeds is not None:
+            body["embeds"] = embeds
         if not existing:
             # Stable nonce plus history reconciliation handles a crash before local state commit.
             body.update(nonce=digest(key)[:24], enforce_nonce=True)
             existing = self.api.request("POST", f"/channels/{channel}/messages", body)
-        elif existing.get("content") != content:
+        elif existing.get("content") != content or (embeds is not None and payload_fingerprint(existing) != payload_fingerprint(body)):
             if key.startswith("stage:"):
                 raise RuntimeError("阶段消息不可改写；恢复远端历史后使用新序号")
             existing = self.api.request("PATCH", f"/channels/{channel}/messages/{existing['id']}", body)
         if not existing or existing.get("channel_id") != channel:
             raise RuntimeError("消息写入/读回频道不符")
         entry.update(id=existing["id"], channel=channel, hash=digest(content))
+        if embeds is not None:
+            entry["payload_hash"] = payload_fingerprint(body)
         self.save()
         return existing["id"]
 
@@ -521,6 +527,8 @@ class Board:
                     f"三层验收：{latest['acceptance']}\n", f"总控记录：{approval}\n"]
         if not approval or not detail or any(line not in detail["content"] for line in required):
             raise RuntimeError("原关闭详情卡与关闭阶段证据冲突")
+        from dev_progress_cards import validate_closed_embed
+        validate_closed_embed(task, latest, detail)
         entry["applied_control_head"] = head
         if self.api.is_archived(thread):
             entry["archived_control_head"] = head
@@ -561,7 +569,8 @@ class Board:
         entry.pop("sync_error", None)
         if head and entry.get("message_id"):
             self.read_owned("detail:" + tid, thread, entry["message_id"])
-        mid = self.message("detail:" + tid, thread, card(task))
+        from dev_progress_cards import detail_content, hwb_detail
+        mid = self.message("detail:" + tid, thread, detail_content(task), embeds=[hwb_detail(task, self.guild_id, thread)])
         self.read_owned("detail:" + tid, thread, mid)
         entry.update(message_id=mid, card_channel_id=thread)
         stage = stage_snapshot(task)
@@ -622,6 +631,8 @@ class Board:
 
     def sync(self, tasks, pool=None):
         tasks = [dict(task) for task in tasks]
+        from dev_progress_cards import restore_overview_pages
+        restore_overview_pages(self)
         if pool is not None:
             pool.validate_anchor(self.state)
             from dev_progress_pool_display import validate_remote_pool
@@ -633,7 +644,8 @@ class Board:
         if pool is not None:
             from dev_progress_pool_display import sync_pool
             prefix = sync_pool(self, pool, tasks, targets)
-        summary = self.message("overview", self.channel_id, prefix + overview(tasks, targets, guild_id=self.guild_id, pool=pool))
+        from dev_progress_cards import sync_overview
+        summary = sync_overview(self, tasks, targets, pool, prefix)
         self.pin_overview(summary)
         self.remove_legacy_cards()
         self.archive_closed(tasks)

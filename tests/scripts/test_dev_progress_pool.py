@@ -186,7 +186,7 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(ids, set(api.messages))
         overview = next(m["content"] for m in api.messages.values() if "问题 1｜任务 2｜执行窗口 2" in m["content"])
         self.assertIn("问题发现入口", overview)
-        self.assertIn("https://discord.com/channels/100/200/300", "\n".join(m["content"] for m in api.messages.values()))
+        self.assertIn("https://discord.com/channels/100/200/300", json.dumps(list(api.messages.values()), ensure_ascii=False))
         saved = json.loads(state.read_text())
         self.path.unlink()
         with self.assertRaises(ValueError):
@@ -197,7 +197,7 @@ class PoolTests(unittest.TestCase):
             self.discover(key=f"disk-{i}")
         api = FakeDiscord()
         board.Board(api, self.home / "state.json").sync([], pool=self.log)
-        contents = "\n".join(m["content"] for m in api.messages.values())
+        contents = json.dumps(list(api.messages.values()), ensure_ascii=False)
         for iid in self.log.data["issues"]:
             self.assertIn(iid, contents)
         self.assertTrue(all(len(m["content"]) <= 2000 for m in api.messages.values()))
@@ -382,7 +382,7 @@ class PoolTests(unittest.TestCase):
             self.receipt(wid, "accepted")
         state.unlink()
         board.Board(api, state).sync([task()], pool=self.log)
-        self.assertNotIn("LLLL", "\n".join(m["content"] for m in api.messages.values()))
+        self.assertNotIn("LLLL", json.dumps(list(api.messages.values()), ensure_ascii=False))
         saved = json.loads(state.read_text())
         mid = saved["messages"]["pool:tasks:1"]["id"]
         duplicate = copy.deepcopy(api.messages[mid])
