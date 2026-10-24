@@ -103,7 +103,7 @@ def classify(meta, pending, is_alive=alive):
     if status in {"running", "starting"}:
         return "运行中", "执行中；业务进展见本地证据"
     if status in {"idle", "stopped"}:
-        return "空闲待验收", "已停止" if status == "stopped" else "执行者空闲；不等于完成"
+        return "待总控核验", "已停止" if status == "stopped" else "执行者空闲；不等于完成"
     return "待决策", "未知HWB状态，需总控确认"
 
 
@@ -114,9 +114,11 @@ def safe_label(value, limit=100):
     return value[:limit]
 
 
-def scan_tasks(home):
+def scan_tasks(home, *, task_id=None):
     tasks = []
     for path in sorted((home / "workers").glob("*/meta.json")):
+        if task_id is not None and path.parent.name != task_id:
+            continue
         meta = json.loads(path.read_text(encoding="utf-8-sig"))  # Broken snapshots fail closed.
         if meta.get("tool") not in {"claude", "codex"} or meta.get("id") != path.parent.name:
             continue
@@ -161,6 +163,8 @@ def scan_tasks(home):
 
 def card(task):
     pending = "、".join("#" + n for n in task["pending"]) or "未发现待答决策文件；其他阻塞未核验"
+    if task.get("disposition"):
+        pending += "；总控说明：" + safe_label(task["disposition"], 240)
     return (f"【{task['alias']}】{task['name']}\n任务：{task['id']}\n"
             f"执行者：{task['executor']}（HWB）\n当前阶段：{task['status']}｜{task['phase']}\n"
             f"业务状态：{task['status']}\nHWB生命周期：{safe_label(task.get('hwb_status', '未核验'))}"
@@ -171,33 +175,57 @@ def card(task):
             f"源记录更新时间：{task['updated']}（Asia/Shanghai）")
 
 
-def overview(tasks, targets=None, *, guild_id, pool=None):
-    targets = targets or {}
+def content_units(text):
+    """Conservative platform budget, including non-BMP characters such as emoji."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def overview_entries(tasks, targets):
     groups = collections.defaultdict(list)
     for task in tasks:
-        section = "完成分区" if task["status"] == "已完成" else "取消分区" if task["status"] == "已取消" else "待办分区"
-        groups[(section, task["alias"])].append(task)
-    lines = ["HWB 开发进度总览", "覆盖：当前profile的HWB登记任务（含新增、运行、空闲和停止任务）。",
-             "未接入的独立agent、手工CLI不在覆盖范围。空闲不等于完成；不估算百分比。",
-             "同步：每5分钟纯脚本轮询；尚未实现事件触发。时间：Asia/Shanghai。",
-             "布局：主区仅总览；状态卡与里程碑在各公共thread。Discord可能保留线程系统入口。",
-             "验收/关单仅采用独立总控记录；完成分区不代表全部已上线。待确认审批仍在总控。"]
-    if pool is not None:
-        lines[:5] = ["问题与任务总览", "覆盖：已登记运维巡检、总控批准目标及当前profile HWB。",
-                     "独立会话须显式登记与接单；未登记会话不在覆盖范围。空闲不等于完成。",
-                     "登记→分派→回传→验收；仅展示轮询，无自主推进。时间：Asia/Shanghai。",
-                     "问题/任务分页见发现入口；原HWB状态卡及里程碑保留原thread。"]
-    for (section, alias), rows in sorted(groups.items()):
-        counts = collections.Counter(t["status"] for t in rows)
-        lines.append(f"\n【{section} · {alias}】{len(rows)}任务：" + "、".join(f"{s}{n}" for s, n in sorted(counts.items())))
+        groups[(not task.get("closed"), task["alias"])].append(task)
+    lines = []
+    for (is_open, alias), rows in sorted(groups.items()):
+        section = "待办分区" if is_open else "关闭后冲突"
+        lines.append(f"【{section} · {safe_label(alias)}】{len(rows)}任务")
         for task in rows:
-            target = targets.get(task["id"])
-            if target and sum(map(len, lines)) < 1450:
-                label = task["name"][:28].replace("[", "（").replace("]", "）")
-                lines.append(f"[{label}](https://discord.com/channels/{guild_id}/{target['thread_id']}/{target['message_id']})：{task['status']}")
-    lines.append("\n最近源记录：" +
-                 max((t["updated"] for t in tasks), default="无任务") + "（Asia/Shanghai）")
+            target = targets.get(task["id"], {})
+            entry = f"<#{target['thread_id']}>" if target.get("thread_id") else "入口未映射（需总控同步）"
+            reason = task["phase"] if task.get("closed") else task.get("disposition")
+            short = safe_label(reason, 24) if reason else ""
+            detail = "；" + short + ("…" if len(str(reason)) > 24 else "") if short else ""
+            lines.append(f"- {safe_label(task['name'])} {entry}｜{task['status']}{detail}")
     return "\n".join(lines)
+
+
+def overview(tasks, targets=None, *, guild_id, channel_id=None):
+    targets = targets or {}
+    tasks = sorted((task for task in tasks if not (
+        task.get("closed") and task["status"] in {"已完成", "已取消"})),
+        key=lambda task: (not task.get("closed"), task["alias"], task["id"]))
+    conflicts = sum(bool(task.get("closed")) for task in tasks)
+    header = ("HWB 开发进度总览\n仅当前profile HWB；5分钟轮询。空闲不等于完成；关单仅采总控验收。\n"
+              f"未关闭：{len(tasks) - conflicts}项；关闭后活动/pending冲突：{conflicts}项。\n")
+    latest = max((task["updated"] for task in tasks), default="无任务")
+    footer = f"\n最近源记录：{latest}（Asia/Shanghai）"
+    body = overview_entries(tasks, targets) if tasks else "暂无未关闭任务。"
+    complete = header + body + footer
+    budget = 2000 - content_units(message_content("overview", ""))
+    if content_units(complete) <= budget:
+        return complete
+    directory = f"<#{channel_id}>" if channel_id else "本频道"
+    selected, result = [], ""
+    for task in tasks:
+        trial = selected + [task]
+        omitted = len(tasks) - len(trial)
+        notice = f"\n另有{omitted}项未展示；明细：{directory}的线程列表（含已归档），按任务名查看原卡。"
+        candidate = header + overview_entries(trial, targets) + notice + footer
+        if content_units(candidate) > budget:
+            break
+        selected, result = trial, candidate
+    if not selected:
+        result = header + f"另有{len(tasks)}项未展示；明细：{directory}的线程列表（含已归档）。" + footer
+    return result
 
 
 def stage_snapshot(task):
@@ -214,6 +242,10 @@ def message_content(key, text, receipt=None):
     suffix += f"\n`[hwb-board:{digest(key)[:24]}]`"
     if len(suffix) > 1900:
         raise RuntimeError("阶段恢复信息过长，停止而非截断证据")
+    if key == "overview":
+        if content_units(text + suffix) > 2000:
+            raise RuntimeError("总览超过平台上限，禁止截断任务条目")
+        return text + suffix
     return text[:min(1800, 2000 - len(suffix))] + suffix
 
 
@@ -222,7 +254,7 @@ def validate_stage(stage):
             {"status", "phase", "pending", "acceptance"},
             {"status", "phase", "pending", "acceptance", "control_head"}):
         raise RuntimeError("阶段恢复信息格式未知")
-    if stage["status"] not in {"运行中", "空闲待验收", "待验收", "失败", "待决策", "已完成", "已取消"}:
+    if stage["status"] not in {"运行中", "空闲待验收", "待验收", "待总控核验", "失败", "待决策", "已完成", "已取消"}:
         raise RuntimeError("阶段恢复信息状态未知")
     if not all(isinstance(stage[k], str) and stage[k] for k in ("phase", "acceptance")):
         raise RuntimeError("阶段恢复信息缺失")
@@ -544,8 +576,8 @@ class Board:
         thread = self.api.thread(thread_id, name, base[:100], create=not task.get("closed"))
         entry["thread_id"] = thread
         self.restore_task(task, entry, thread)
-        if entry.get("stage", {}).get("status") == "空闲待验收" and task["status"] == "待验收" and not task.get("control_head"):
-            entry["stage"]["status"] = "待验收"  # Rename legacy label without inventing a milestone.
+        if entry.get("stage", {}).get("status") in {"空闲待验收", "待验收"} and task["status"] == "待总控核验" and not task.get("control_head"):
+            entry["stage"]["status"] = "待总控核验"  # Rename legacy label without inventing a milestone.
         self.save()
         head = task.get("control_head")
         if task.get("closed"):
@@ -689,17 +721,19 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return
-        tasks = scan_tasks(args.home)
-        from dev_progress_review import ReviewLog, project_tasks, validate_delivery_anchor
+        from dev_progress_review import ReviewLog, auto_close, project_tasks, validate_delivery_anchor
         control = ReviewLog(args.state_dir / "control.json")
         state_path = args.state_dir / "state.json"
-        prior_state = json.loads(state_path.read_text(encoding="utf-8-sig")) if state_path.exists() else {"tasks": {}}
+        prior_state = json.loads(state_path.read_text(encoding="utf-8-sig")) if state_path.exists() else {"tasks": {}, "messages": {}}
         validate_state_target(prior_state, target)
         validate_delivery_anchor(control, prior_state)
         from dev_progress_pool import Pool
         pool = Pool(args.state_dir / "pool.json")
         pool.validate_anchor(prior_state)
-        tasks = project_tasks(tasks, control)
+        if not args.dry_run:
+            auto_close(args.home, control, prior_state)
+            atomic_json(state_path, prior_state)
+        tasks = project_tasks(scan_tasks(args.home), control)
         if args.dry_run:
             preview = {"hwb_tasks": tasks, "pool": pool.data, "counts": pool.counts(tasks)} if pool.events else tasks
             print(json.dumps(preview, ensure_ascii=False, indent=2))

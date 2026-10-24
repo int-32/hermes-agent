@@ -246,3 +246,52 @@ class CardTests(unittest.TestCase):
         output = "\n".join(visible(m) for m in self.api.messages.values())
         for tid in fixture.log.data["tasks"]:
             self.assertIn(tid, output)
+
+    def test_normal_closure_is_not_active_but_archived_conflict_remains_visible(self):
+        fixture = self.pool_fixture()
+        fixture.goal()
+        fixture.window()
+        wid = next(iter(fixture.log.data["windows"]))
+        fixture.receipt(wid, "accepted")
+        fixture.receipt(wid, "report")
+        checks = {key: {"status": "passed", "evidence": ["raw:" + key]} for key in review.STAGES}
+        fixture.apply("review", {"task_id": "t1", "approval_ref": "pool-review", "checks": checks})
+        fixture.apply("close", {"task_id": "t1", "approval_ref": "pool-close", "reason": "总控核验", "outcome": "completed"})
+        closed = dict(task("已完成"), closed=True, control_head="close-1",
+                      control_event={"hash": "close-1", "approval_ref": "approval:close", "action": "close"})
+        board.Board(self.api, self.state).sync([task()], pool=fixture.log)
+        board.Board(self.api, self.state).sync([closed], pool=fixture.log)
+        saved = json.loads(self.state.read_text())
+        home = self.api.messages[saved["messages"]["overview"]["id"]]
+        self.assertIn("问题 0｜任务 0｜执行窗口 0", visible(home))
+        self.assertIn("暂无未关闭任务", visible(home))
+        self.assertNotIn("开发任务", visible(home))
+        self.assertNotIn("批准的目标", visible(home))
+        # Persistent registry counts/history remain intact; only activity is filtered.
+        self.assertEqual(fixture.log.counts([]), {"issues": 0, "tasks": 1, "windows": 1})
+        thread = saved["tasks"][closed["id"]]["thread_id"]
+        history = copy.deepcopy(self.api.history(thread))
+        conflict = dict(closed, status="待决策", phase="关闭后再次出现待答#7", pending=["7"])
+        self.state.unlink()
+        board.Board(self.api, self.state).sync([conflict], pool=fixture.log)
+        home = self.api.messages[saved["messages"]["overview"]["id"]]
+        self.assertIn("关闭后再次出现", visible(home))
+        self.assertIn("问题 0｜任务 1｜执行窗口 1", visible(home))
+        self.assertEqual(self.api.history(thread), history)
+        self.assertIn(thread, self.api.archived)
+
+    def test_deployed_waiting_stage_and_disposition_restore_without_new_milestone(self):
+        item = dict(task("待总控核验"), disposition="等维护者合并；尚缺环境回执")
+        board.Board(self.api, self.state).sync([item])
+        saved = json.loads(self.state.read_text())
+        self.state.unlink()
+        before = self.api.operations.copy()
+        board.Board(self.api, self.state).sync([item])
+        for method in ("POST", "PATCH", "PUT", "DELETE"):
+            self.assertEqual(before[method], self.api.operations[method])
+        latest = json.loads(self.state.read_text())
+        self.assertEqual(latest["tasks"][item["id"]]["sequence"], saved["tasks"][item["id"]]["sequence"])
+        detail = self.api.messages[latest["tasks"][item["id"]]["message_id"]]
+        self.assertIn("待总控核验", visible(detail))
+        self.assertIn("等维护者合并", visible(detail))
+        self.assertEqual(detail["embeds"][0]["color"], cards.COLORS["waiting"])

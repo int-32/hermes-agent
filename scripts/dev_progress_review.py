@@ -51,6 +51,8 @@ def validate_checks(checks):
             raise ValueError(f"{key}验收项必须是对象")
         if check.get("status") not in LABELS:
             raise ValueError(f"{key}验收状态无效")
+        if "reason" in check and not isinstance(check["reason"], str):
+            raise ValueError(f"{key}验收原因必须是文字")
         evidence = check.get("evidence", [])
         if not isinstance(evidence, list) or any(not isinstance(ref, str) or not ref.strip() for ref in evidence):
             raise ValueError(f"{key}证据必须是非空引用列表")
@@ -207,7 +209,7 @@ class ReviewLog:
             payload = json.loads(json.dumps(payload))
             current_hashes = source_hashes(home, tid)
             self.validate_action(state, action, payload, life, board_state, tid, current_hashes)
-            snapshot = next(t for t in scan_tasks(home) if t["id"] == tid)
+            snapshot = next(t for t in scan_tasks(home, task_id=tid) if t["id"] == tid)
             if action == "close":
                 fresh_meta, fresh_life = worker(home, tid)
                 close_guard(fresh_life)
@@ -224,13 +226,47 @@ class ReviewLog:
             return event
 
 
+def auto_close(home, log, board_state):
+    """Consume existing controller acceptance; never create or upgrade a review."""
+    require_controller(home)
+    loaded = ReviewLog(log.path)
+    log.events, log.head = loaded.events, loaded.head
+    validate_delivery_anchor(log, board_state)
+    tids = {path.parent.name for path in (home / "workers").glob("*/meta.json")}
+    tids.update(event["task_id"] for event in log.events)
+    results = []
+    for tid in sorted(tids):
+        row = {"task_id": tid}
+        try:
+            state = log.current(tid)
+            if state["close"]:
+                row.update(status="already_closed", close_hash=state["close"]["hash"])
+            else:
+                worker(home, tid)  # Validate each source separately, including unreviewed tasks.
+                accepted = state["review"]
+                if not accepted:
+                    raise ValueError("无总控三层验收记录；待总控核验")
+                payload = {"outcome": "completed", "reason": "自动收尾：复用已有且仍有效的总控三层验收",
+                           "evidence": ["control.json#" + accepted["hash"], accepted["approval_ref"]]}
+                event = log.apply(home, tid, "close", payload, controller="auto-close",
+                                  approval_ref="auto-close:" + accepted["hash"], board_state=board_state)
+                row.update(status="closed", close_hash=event["hash"])
+        except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError, KeyError, TypeError) as exc:
+            row.update(status="failed", reason=str(exc))
+        except ValueError as exc:
+            row.update(status="blocked", reason=str(exc))
+        results.append(row)
+    board_state["last_auto_close"] = {"at": datetime.now(TZ).isoformat(), "tasks": results}
+    return results
+
+
 def acceptance_text(event):
     if not event:
         return "｜".join(label + "：未核验" for label in STAGES.values())
     lines = []
     for key, label in STAGES.items():
         check = event["payload"]["checks"][key]
-        suffix = "；理由：" + check["reason"][:96] if check["status"] == "not_applicable" else ""
+        suffix = "；理由：" + check["reason"][:96] if check["status"] in {"not_applicable", "unverified"} and check.get("reason") else ""
         refs = "；证据：" + "、".join(check.get("evidence", []))[:120] if check.get("evidence") else ""
         lines.append(label + "：" + LABELS[check["status"]] + suffix + refs)
     return "｜".join(lines)
@@ -249,12 +285,18 @@ def project_tasks(tasks, log):
             raise ValueError("当前HWB登记身份与总控记录不一致，停止同步")
         task.update(closed=bool(state["close"]), control_head=state["latest"]["hash"] if state["latest"] else None,
                     control_event=state["latest"], reopen_event=state["reopen"], acceptance=acceptance_text(state["review"]))
-        if task["status"] == "空闲待验收":
-            task["status"] = "待验收"
+        checks = state["review"]["payload"]["checks"] if state["review"] else {}
+        task["disposition"] = "；".join(STAGES[key] + "：" + check.get("reason", "待总控核验")[:96]
+                                         for key, check in checks.items() if check["status"] == "unverified")
+        if not state["review"]:
+            task["disposition"] = "尚无独立总控验收记录，待总控核验"
+        if task["status"] in {"空闲待验收", "待验收"}:
+            task["status"] = "待总控核验"
         if state["close"]:
             event = state["close"]
+            method = "总控验收后自动收尾" if event["controller"] == "auto-close" else "总控显式关单"
             task.update(status="已完成" if event["payload"]["outcome"] == "completed" else "已取消",
-                        phase="总控显式关单；完成不等于全部已上线", progress="总控验收/关单记录已持久化",
+                        phase=method + "；完成不等于全部已上线", progress="总控验收/关单记录已持久化",
                         updated=event["at"], evidence="control.json#" + event["hash"])
             if task.get("pending") or task.get("worker_alive") or task.get("hwb_status") in ACTIVE:
                 task.update(status="待决策", phase="关闭后worker再次活动或有pending；保持归档，需总控明确reopen")
@@ -280,18 +322,11 @@ def candidates(home, log, board_state):
         else:
             meta, life = {}, {"status": "source_missing", "pid": None, "alive": False, "pending": []}
         blockers = []
-        if not state["review"]:
-            blockers.append("无总控三层验收记录；worker自评不能代签")
-        elif any(c["status"] == "unverified" for c in state["review"]["payload"]["checks"].values()):
-            blockers.append("仍有未核验验收项")
         try:
-            close_guard(life)
+            log.validate_action(state, "close", {"outcome": "completed", "reason": "只读候选门禁检查",
+                                "evidence": [str(log.path)]}, life, board_state, tid, source_hashes(home, tid))
         except ValueError as exc:
             blockers.append(str(exc))
-        if tid not in board_state.get("tasks", {}):
-            blockers.append("尚无看板卡片映射")
-        elif board_state["tasks"][tid].get("sync_error"):
-            blockers.append(board_state["tasks"][tid]["sync_error"])
         raw = []
         for name in ("meta.json", "events.jsonl"):
             path = home / "workers" / tid / name
@@ -314,6 +349,7 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("candidates", help="只读候选和原始证据路径，不生成验收记录")
     commands.add_parser("verify", help="校验独立验收记录的schema和哈希链")
+    commands.add_parser("auto-close", help="总控/定时脚本消费已有有效验收，逐任务记录结果；不新增验收")
     for verb in ("record", "close", "reopen"):
         sub = commands.add_parser(verb)
         sub.add_argument("task_id")
@@ -329,7 +365,7 @@ def main():
     args = parser.parse_args()
     log = ReviewLog(args.state_dir / "control.json")
     state_path = args.state_dir / "state.json"
-    board_state = json.loads(state_path.read_text(encoding="utf-8-sig")) if state_path.exists() else {"tasks": {}}
+    board_state = json.loads(state_path.read_text(encoding="utf-8-sig")) if state_path.exists() else {"tasks": {}, "messages": {}}
     validate_delivery_anchor(log, board_state)
     if args.command == "verify":
         delivery = []
@@ -342,7 +378,8 @@ def main():
                              "thread_id": row.get("thread_id"), "card_id": row.get("message_id"),
                              "sync_error": row.get("sync_error")})
         print(json.dumps({"valid": True, "events": len(log.events), "head": log.head,
-                          "delivery": delivery, "last_sync": board_state.get("last_sync")}, ensure_ascii=False, indent=2))
+                          "delivery": delivery, "last_sync": board_state.get("last_sync"),
+                          "last_auto_close": board_state.get("last_auto_close")}, ensure_ascii=False, indent=2))
         return
     if args.command == "candidates":
         print(json.dumps(candidates(args.home, log, board_state), ensure_ascii=False, indent=2))
@@ -352,6 +389,13 @@ def main():
 
     with (args.state_dir / "sync.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        board_state = json.loads(state_path.read_text(encoding="utf-8-sig")) if state_path.exists() else {"tasks": {}, "messages": {}}
+        validate_delivery_anchor(ReviewLog(log.path), board_state)
+        if args.command == "auto-close":
+            results = auto_close(args.home, log, board_state)
+            atomic_json(state_path, board_state)
+            print(json.dumps(results, ensure_ascii=False, indent=2))
+            return
         if args.command == "record":
             payload = {"checks": json.loads(args.checks_file.read_text(encoding="utf-8-sig"))}
             action = "review"

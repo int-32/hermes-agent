@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -19,6 +20,8 @@ board = importlib.util.module_from_spec(SPEC)
 sys.path.insert(0, str(Path(SPEC.origin).parent))
 SPEC.loader.exec_module(board)
 importlib.import_module("dev_progress_cards")
+importlib.import_module("dev_progress_pool")
+importlib.import_module("dev_progress_pool_display")
 sys.path.pop(0)
 TEST_GUILD = "100000000000000001"
 TEST_CHANNEL = "100000000000000002"
@@ -122,6 +125,152 @@ class BoardTests(unittest.TestCase):
         return dict(task("已完成"), closed=True, control_head="close-1",
                     control_event={"hash": "close-1", "at": "2026-10-22 02:00:00",
                                    "action": "close", "reason": "总控明确核验", "approval_ref": "discord:approved"})
+
+    def overview_tasks(self, count):
+        aliases = ("discord", "小贷项目", "总控", "版权项目", "自动运维")
+        rows = [dict(task("待总控核验"), id=f"open-{n:03d}", alias=aliases[n % len(aliases)],
+                     name=f"{aliases[n % len(aliases)]}-交付与部署核验任务第{n:03d}项",
+                     disposition="尚缺总控核验回执；需独立复核测试、主线提交及环境验收。" * 30)
+                for n in range(count)]
+        targets = {row["id"]: {"thread_id": str(1000000000000000100 + n),
+                               "message_id": str(1000000000000001000 + n)} for n, row in enumerate(rows)}
+        return rows, targets
+
+    def test_overview_local_task_scale_keeps_every_name_entry_and_short_reason(self):
+        for count in (15, 17):
+            with self.subTest(count=count):
+                rows, targets = self.overview_tasks(count)
+                summary = board.overview(rows, targets, guild_id=TEST_GUILD)
+                content = board.message_content("overview", summary)
+                delivered = json.loads(json.dumps({"content": content}, ensure_ascii=False))["content"]
+                self.assertLessEqual(len(delivered.encode("utf-16-le")) // 2, 2000)
+                self.assertEqual(delivered, summary + board.message_content("overview", ""))
+                entries = [line for line in delivered.splitlines() if line.startswith("- ")]
+                self.assertEqual(len(entries), len(rows))
+                for row in rows:
+                    entry, = [line for line in entries if row["name"] in line]
+                    self.assertIn(f"<#{targets[row['id']]['thread_id']}>", entry)
+                    self.assertIn("尚缺总控核验回执", entry)
+                for alias in {row["alias"] for row in rows}:
+                    header, = [line for line in delivered.splitlines() if line.startswith("【") and alias in line]
+                    self.assertIn(str(sum(row["alias"] == alias for row in rows)) + "任务", header)
+                self.assertNotIn("未展示", delivered)
+
+    def test_overview_overflow_reports_exact_omission_and_details_without_cut_lines(self):
+        rows, targets = self.overview_tasks(180)
+        conflict = dict(self.closed_task(), name="关闭后活动冲突必须优先显示", alias="ZZZ", status="待决策",
+                        phase="关闭后出现pending，需总控reopen")
+        targets[conflict["id"]] = {"thread_id": "1000000000000000999", "message_id": "1000000000000001999"}
+        closed = dict(self.closed_task(), id="hidden", name="正常关闭不得展示")
+        summary = board.overview([*rows, closed, conflict], targets, guild_id=TEST_GUILD, channel_id=TEST_CHANNEL)
+        content = board.message_content("overview", summary)
+        self.assertLessEqual(len(content.encode("utf-16-le")) // 2, 2000)
+        self.assertEqual(content, summary + board.message_content("overview", ""))
+        entries = [line for line in content.splitlines() if line.startswith("- ")]
+        omitted = re.search(r"另有(\d+)项未展示", content)
+        self.assertIsNotNone(omitted)
+        self.assertEqual(len(entries) + int(omitted[1]), len(rows) + 1)
+        self.assertIn(conflict["name"], entries[0])
+        self.assertIn("关闭后出现pending", entries[0])
+        self.assertNotIn(closed["name"], content)
+        self.assertIn("明细", content)
+        self.assertIn("线程列表", content)
+        self.assertIn(f"<#{TEST_CHANNEL}>", content)
+        for line in entries:
+            self.assertEqual(len(re.findall(r"<#\d+>", line)), 1)
+            self.assertTrue(any(row["name"] in line for row in [*rows, conflict]))
+
+    def test_board_delivers_every_local_scale_task_entry_in_final_message(self):
+        rows, _ = self.overview_tasks(17)
+        self.api.next_id = 1000000000000000000
+        board.Board(self.api, self.state).sync(rows)
+        saved = json.loads(self.state.read_text())
+        content = self.api.messages[saved["messages"]["overview"]["id"]]["content"]
+        self.assertLessEqual(len(content.encode("utf-16-le")) // 2, 2000)
+        # The same completeness contract now spans native cards and explicit pages.
+        entries = [field for message in self.api.history(TEST_CHANNEL)
+                   for embed in message.get("embeds", []) for field in embed.get("fields", [])
+                   if field["value"].startswith("任务：")]
+        self.assertEqual({field["value"].splitlines()[0] for field in entries}, {"任务：" + row["id"] for row in rows})
+        for row in rows:
+            entry = next(field for field in entries if field["value"].startswith("任务：" + row["id"] + "\n"))
+            self.assertIn(row["name"], entry["name"])
+            target = saved["tasks"][row["id"]]
+            self.assertIn(f"https://discord.com/channels/{TEST_GUILD}/{target['thread_id']}/{target['message_id']}", entry["value"])
+            self.assertIn("尚缺总控核验回执", entry["value"])
+        self.assertTrue(self.api.messages[saved["messages"]["overview"]["id"]]["embeds"])
+        self.assertTrue(content.endswith("`[hwb-board:" + board.digest("overview")[:24] + "]`"))
+
+    def test_overview_serializer_refuses_to_silently_truncate_unbudgeted_content(self):
+        with self.assertRaisesRegex(RuntimeError, "总览"):
+            board.message_content("overview", "长" * 2000 + "<#1000000000000000999>")
+
+    def test_overview_serializer_preserves_last_complete_entry_at_platform_limit(self):
+        suffix = board.message_content("overview", "")
+        entry = "\n- 尾部任务🔍 <#1000000000000000999>｜待总控核验；尚缺环境回执"
+        available = 2000 - len((entry + suffix).encode("utf-16-le")) // 2
+        summary = "中" * available + entry
+        content = board.message_content("overview", summary)
+        self.assertEqual(len(content.encode("utf-16-le")) // 2, 2000)
+        self.assertEqual(content, summary + suffix)
+
+    def test_overview_without_mapping_keeps_name_and_explicit_entry_blocker(self):
+        content = board.message_content("overview", board.overview([task()], guild_id=TEST_GUILD))
+        self.assertIn(task()["name"], content)
+        self.assertIn("入口未映射", content)
+
+    def test_overview_emoji_budget_counts_final_serialized_content(self):
+        rows, targets = self.overview_tasks(40)
+        for row in rows:
+            row["name"] += "🔍" * 20
+        summary = board.overview(rows, targets, guild_id=TEST_GUILD)
+        content = board.message_content("overview", summary)
+        self.assertLessEqual(len(content.encode("utf-16-le")) // 2, 2000)
+        self.assertEqual(content, summary + board.message_content("overview", ""))
+        self.assertIn("未展示", content)
+
+    def test_overview_omits_normal_closed_tasks_and_their_timestamps(self):
+        completed = dict(self.closed_task(), name="完成任务", alias="完成项目", updated="2099-01-01")
+        cancelled = dict(completed, id="取消", name="取消任务", alias="取消项目", status="已取消")
+        targets = {row["id"]: {"thread_id": "10", "message_id": "11"}
+                   for row in (completed, cancelled, task())}
+        text = board.overview([completed, cancelled, task()], targets, guild_id=TEST_GUILD)
+        self.assertIn("开发任务", text)
+        for hidden in ("完成项目", "取消项目", "完成任务", "取消任务", "2099-01-01"):
+            self.assertNotIn(hidden, text)
+        self.assertIn("暂无未关闭任务", board.overview([completed, cancelled], targets, guild_id=TEST_GUILD))
+
+    def test_controller_disposition_is_visible_in_card_and_overview_without_changing_runtime(self):
+        row = dict(task(), disposition="合入主线：等维护者合并；上线验收：等环境回执")
+        board.Board(self.api, self.state).sync([row])
+        saved = json.loads(self.state.read_text())
+        for mid in (saved["messages"]["overview"]["id"], saved["tasks"][row["id"]]["message_id"]):
+            text = json.dumps(self.api.messages[mid], ensure_ascii=False)
+            self.assertIn("等维护者合并", text)
+            self.assertIn("运行中", text)
+
+    def test_closed_conflict_is_exposed_before_large_open_backlog(self):
+        backlog = [dict(task(), id=f"open-{n}", alias="AAA", name=f"未关闭任务{n}") for n in range(40)]
+        conflict = dict(self.closed_task(), alias="ZZZ", name="关闭后冲突任务", status="待决策", phase="关闭后出现pending")
+        targets = {row["id"]: {"thread_id": "10", "message_id": "11"} for row in [*backlog, conflict]}
+        text = board.message_content("overview", board.overview([*backlog, conflict], targets, guild_id=TEST_GUILD))
+        self.assertIn("关闭后冲突任务", text)
+        self.assertIn("关闭后出现pending", text)
+
+    def test_archived_closed_conflict_remains_in_overview_and_preserves_history(self):
+        board.Board(self.api, self.state).sync([task()])
+        board.Board(self.api, self.state).sync([self.closed_task()])
+        saved = json.loads(self.state.read_text())
+        thread = saved["tasks"]["任务-1"]["thread_id"]
+        history = copy.deepcopy(self.api.history(thread))
+        for conflict in ({"pending": ["7"]}, {"worker_alive": True}):
+            row = dict(self.closed_task(), status="待决策", phase="关闭后worker再次活动或有pending", **conflict)
+            board.Board(self.api, self.state).sync([row])
+            summary = self.api.messages[saved["messages"]["overview"]["id"]]["content"]
+            self.assertIn("开发任务", summary)
+            self.assertIn("关闭后", summary)
+            self.assertIn(thread, self.api.archived)
+            self.assertEqual(self.api.history(thread), history)
 
     def test_close_updates_original_card_and_overview_before_archiving(self):
         board.Board(self.api, self.state).sync([task()])
@@ -374,7 +523,7 @@ class BoardTests(unittest.TestCase):
     def test_idle_stopped_and_successful_turn_are_not_completion(self):
         for status in ("idle", "stopped"):
             result = board.classify({"status": status}, [], lambda _: True)
-            self.assertEqual(result[0], "空闲待验收")
+            self.assertEqual(result[0], "待总控核验")
         text = board.card(task("空闲待验收"))
         self.assertIn("开发完成：未核验", text)
         self.assertIn("合入主线：未核验", text)
@@ -691,7 +840,7 @@ class BoardTests(unittest.TestCase):
         self.assertEqual(result["alias"], "示例项目")
         self.assertNotIn("secret", board.card(result))
         (directory / "decisions" / "1.answer.json").write_text('{}')
-        self.assertEqual(board.scan_tasks(self.root)[0]["status"], "空闲待验收")
+        self.assertEqual(board.scan_tasks(self.root)[0]["status"], "待总控核验")
 
     def test_atomic_state_and_invalid_state_fail_closed(self):
         board.atomic_json(self.state, {"中文": 1})
@@ -769,6 +918,43 @@ class BoardTests(unittest.TestCase):
         self.assertEqual(state["target"], {"guild_id": TEST_GUILD, "channel_id": TEST_CHANNEL})
         self.assertEqual(state["messages"]["overview"]["channel"], TEST_CHANNEL)
 
+    def test_cli_auto_closes_existing_acceptance_but_dry_run_never_writes(self):
+        with patch("sys.path", [str(Path(SPEC.origin).parent), *sys.path]):
+            import dev_progress_review as review
+        directory = self.root / "workers" / "task-1"
+        directory.mkdir(parents=True)
+        (directory / "meta.json").write_text(json.dumps({"id": "task-1", "tool": "codex", "status": "stopped"}))
+        log = review.ReviewLog(self.root / "control.json")
+        board.Board(self.api, self.state).sync(review.project_tasks(board.scan_tasks(self.root), log))
+        saved = json.loads(self.state.read_text())
+        checks = {key: {"status": "passed", "evidence": ["artifact:" + key]} for key in review.STAGES}
+        with patch.object(review, "require_controller"):
+            log.apply(self.root, "task-1", "review", {"checks": checks}, controller="总控测试",
+                      approval_ref="test:approval", board_state=saved)
+        args = self.cli_args("--guild-id", TEST_GUILD, "--channel-id", TEST_CHANNEL)
+        before = self.state.read_bytes(), log.path.read_bytes()
+        with patch("sys.argv", [*args, "--dry-run"]), redirect_stdout(io.StringIO()), \
+                patch.object(board, "Discord") as api, patch.object(review, "require_controller") as guard:
+            board.main()
+            api.assert_not_called()
+            guard.assert_not_called()
+        self.assertEqual((self.state.read_bytes(), log.path.read_bytes()), before)
+        with patch("sys.argv", args), patch.object(review, "require_controller", side_effect=PermissionError("worker")), \
+                patch.object(board, "Discord") as api:
+            with self.assertRaises(PermissionError):
+                board.main()
+            api.assert_not_called()
+        with patch("sys.argv", args), patch.object(review, "require_controller"), \
+                patch.object(board, "Discord", return_value=self.api), \
+                patch.object(board, "token_from_home", return_value="synthetic"):
+            board.main()
+        after = json.loads(self.state.read_text())
+        self.assertEqual(saved["tasks"]["task-1"]["message_id"], after["tasks"]["task-1"]["message_id"])
+        self.assertIn(after["tasks"]["task-1"]["thread_id"], self.api.archived)
+        self.assertEqual(len(review.ReviewLog(log.path).events), 2)
+        summary = self.api.messages[after["messages"]["overview"]["id"]]["content"]
+        self.assertIn("暂无未关闭任务", summary)
+
     def test_configured_transport_validates_remote_parent_identity(self):
         expected = {"id": TEST_CHANNEL, "guild_id": TEST_GUILD, "type": 0}
         for bad in ({"id": "100000000000000003"}, {"guild_id": "100000000000000004"}, {"type": 11}):
@@ -808,7 +994,7 @@ class BoardTests(unittest.TestCase):
             saved = json.loads(state.read_text())
             overview = api.messages[saved["messages"]["overview"]["id"]]
             self.assertEqual(overview["channel_id"], api.channel_id)
-            self.assertIn(f"https://discord.com/channels/{api.guild_id}/", overview["content"])
+            self.assertIn(f"https://discord.com/channels/{api.guild_id}/{saved['tasks']['任务-1']['thread_id']}/", overview["content"])
         before = dict(self.api.operations)
         board.Board(self.api, self.state).sync([task()])
         self.assert_no_remote_writes(before)

@@ -84,7 +84,7 @@ def payload_fingerprint(message):
 def tone(status):
     if status in {"待决策", "失败"}:
         return "attention"
-    if status in {"待核实", "待分派", "待验收", "空闲待验收"}:
+    if status in {"待核实", "待分派", "待验收", "待总控核验", "空闲待验收"}:
         return "waiting"
     return "closed" if status in {"已完成", "已取消", "关闭", "重复", "暂不处理"} else "active"
 
@@ -121,6 +121,8 @@ def hwb_detail(task, guild_id=None, thread_id=None):
               field("材料引用", clip(task["evidence"], 300)), field("源记录更新", clip(task["updated"], 60))]
     if thread_id and guild_id:
         fields.append(field("执行窗口", f"[HWB状态窗口](https://discord.com/channels/{guild_id}/{thread_id})\n原生会话链接未独立登记"))
+    if task.get("disposition"):
+        fields.append(field("总控未完成说明", clip(task["disposition"], 500)))
     return make_card(task["name"], fields, status=task["status"], footer="HWB任务：" + task["id"])
 
 
@@ -255,6 +257,8 @@ def summary_rows(tasks, targets, pool, guild_id):
     mapped = set()
     if pool is not None:
         for tid, task in sorted(pool.data["tasks"].items()):
+            if task["closed"]:
+                continue
             status = STATUS[pool.task_status(tid)]
             windows = [pool.data["windows"][wid] for wid in task["window_ids"]]
             mapped.update(w["session_id"] for w in windows if w["kind"] == "hwb")
@@ -267,21 +271,40 @@ def summary_rows(tasks, targets, pool, guild_id):
                 value += "\n阻塞回传：" + clip(blockers[0], 180)
             rows.append((priority, field(clip(task["title"], 40) + " · " + status, value)))
     for task in tasks:
-        if task["id"] in mapped:
+        if task["id"] in mapped or normal_closed(task):
             continue
         target = targets.get(task["id"])
         url = f"https://discord.com/channels/{guild_id}/{target['thread_id']}/{target['message_id']}" if target else None
         value = "任务：" + clip(task["id"], 100) + "\nOwner：" + clip(task["executor"], 80)
         value += "\n[HWB状态窗口](" + url + ")" if url else "\nHWB窗口尚未同步"
+        if task.get("disposition"):
+            value += "\n总控说明：" + clip(task["disposition"], 120)
+        if task.get("closed"):
+            value += "\n" + clip(task["phase"], 120)
         priority = 0 if task["status"] in {"待决策", "失败"} else 2 if task["status"] in {"已完成", "已取消"} else 1
         rows.append((priority, field(clip(task["name"], 40) + " · " + task["status"], value)))
     return sorted(rows, key=lambda row: row[0])
 
 
+def normal_closed(task):
+    return task.get("closed") and task["status"] in {"已完成", "已取消"}
+
+
+def active_counts(tasks, pool=None):
+    hwb = {task["id"] for task in tasks if not normal_closed(task)}
+    if pool is None:
+        return {"issues": 0, "tasks": len(hwb), "windows": len(hwb)}
+    active = [task for task in pool.data["tasks"].values() if not task["closed"]]
+    window_ids = {wid for task in active for wid in task["window_ids"]}
+    mapped = {pool.data["windows"][wid]["session_id"] for wid in window_ids if pool.data["windows"][wid]["kind"] == "hwb"}
+    issues = sum(pool.issue_status(iid) not in {"closed", "duplicate", "deferred"} for iid in pool.data["issues"])
+    return {"issues": issues, "tasks": len(active) + len(hwb - mapped), "windows": len(window_ids) + len(hwb - mapped)}
+
+
 def attention_fields(tasks, targets, pool, guild_id):
     fields = []
     # Also inspect mapped HWB windows: pool deduplication must not hide decisions.
-    for task in tasks:
+    for task in sorted(tasks, key=lambda t: not t.get("closed")):
         if task["status"] not in {"待决策", "失败"}:
             continue
         target = targets.get(task["id"])
@@ -304,9 +327,11 @@ def attention_fields(tasks, targets, pool, guild_id):
 
 def sync_overview(board, tasks, targets, pool, prefix):
     rows = summary_rows(tasks, targets, pool, board.guild_id)
-    counts = pool.counts(tasks) if pool is not None else {"issues": 0, "tasks": len(tasks), "windows": len(tasks)}
+    counts = active_counts(tasks, pool)
     stats = f"问题 {counts['issues']}｜任务 {counts['tasks']}｜执行窗口 {counts['windows']}"
-    fields = [field("独立计数", stats)]
+    fields = [field("活动计数（正常关闭不计入）", stats)]
+    if not rows:
+        fields.append(field("活动任务", "暂无未关闭任务。"))
     attention = attention_fields(tasks, targets, pool, board.guild_id)
     # Show at least one of each attention category before filling the mobile page.
     decisions = [f for f in attention if f["name"].startswith("需关注")]
@@ -329,7 +354,7 @@ def sync_overview(board, tasks, targets, pool, prefix):
     embed = make_card("问题与任务总览", fields, description="先处理待决策、阻塞及高严重观察；待核实不等于缺陷已确认。", status=status,
                       footer=f"首页展示 {shown}/{len(rows)} 任务 · 仅展示轮询，不自主推进")
     # A short fallback also preserves old consumers' direct task-window link.
-    fallback = stats + "\n" + prefix + "\n" + "\n".join(item["name"] + "\n" + item["value"] for _, item in rows[:1])
+    fallback = stats + "\n" + prefix + "\n" + ("\n".join(item["name"] + "\n" + item["value"] for _, item in rows[:1]) or "暂无未关闭任务。")
     return board.message("overview", board.channel_id, fallback, embeds=[embed])
 
 

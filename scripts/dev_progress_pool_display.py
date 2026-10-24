@@ -3,7 +3,7 @@ import re
 import copy
 
 from dev_progress_board import digest, safe_label
-from dev_progress_cards import attention_fields, card_pages, field, issue_cards, make_card, pool_task_cards
+from dev_progress_cards import active_counts, attention_fields, card_pages, field, issue_cards, make_card, normal_closed, pool_task_cards
 
 
 def label(value, limit=140):
@@ -61,6 +61,8 @@ def sync_pool(board, pool, tasks, targets):
     task_ids = sync_pages(board, "tasks", cards=pool_task_cards(pool, targets, board.guild_id, tasks))
     window_lines = ["原HWB执行窗口索引（保留既有记录；不与关联池任务重复计数）"]
     for task in tasks:
+        if normal_closed(task):
+            continue
         target = targets.get(task["id"])
         if target:
             window_lines.append(f"[{label(task['name'])}](https://discord.com/channels/{board.guild_id}/{target['thread_id']}/{target['message_id']})｜{label(task['id'])}｜Owner：{label(task['executor'])}｜{label(task['status'])}")
@@ -74,7 +76,7 @@ def sync_pool(board, pool, tasks, targets):
     cached = board.state["messages"].get("pool:entry", {})
     if cached.get("id"):
         board.read_owned("pool:entry", board.channel_id, cached["id"])
-    counts = pool.counts(tasks)
+    counts = active_counts(tasks, pool)
     attention = attention_fields([], targets, pool, board.guild_id)
     entry_card = make_card("问题发现入口", [field("独立计数", f"问题 {counts['issues']}｜任务 {counts['tasks']}｜执行窗口 {counts['windows']}"),
         *attention[:2],

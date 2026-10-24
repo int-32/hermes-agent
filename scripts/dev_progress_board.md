@@ -76,7 +76,7 @@ hermes cron list --all
 ## 状态与证据
 
 - running/starting：运行中；pending 决策或 waiting_decision：待决策。
-- idle/stopped：业务状态待验收，HWB空闲/停止单独标注；failed/dead 或活动登记进程已退出：失败。
+- idle/stopped：默认“待总控核验”，HWB空闲/停止单独标注；failed/dead 或活动登记进程已退出：失败。
 - 仅按 HWB 登记 PID 检查存活，不凭进程 argv 推断身份；PID 存活不能证明业务正在推进。
 - 开发完成、合入主线、上线验收默认分别显示“未核验”，仅根据独立总控记录更新。退出码、模型反馈、空闲、停止均不提升验收结论。
 - 证据指向本机元数据/事件文件和行号；不公布 prompt、工具输入、模型正文或决策内容。
@@ -128,7 +128,7 @@ scripts/run_tests.sh tests/scripts/test_dev_progress_board.py
 
 ## 总控验收、关单与重新开启
 
-业务状态与HWB生命周期分开显示。`idle`/`stopped`只表示待验收，不代表开发完成、合入或上线；
+业务状态与HWB生命周期分开显示。`idle`/`stopped`只表示空闲/停止，默认“待总控核验”，不代表开发完成、合入或上线；
 worker的最终回复仅是原始材料。`control.json` 是独立于 `state.json` 的总控记录，
 含三层检查、证据引用、NA理由、总控身份、明确审批引用、任务登记身份、操作原因、时间及前序哈希。
 记录以文件锁、fsync和原子替换串行保存；每次读取校验schema、哈希链及关单因果关系。
@@ -168,7 +168,7 @@ hwb status "$TASK_ID"
 hwb stop "$TASK_ID"
 hwb status "$TASK_ID"
 
-# 总控自行准备checks.json；record只登记验收，不自动关单
+# 总控自行准备checks.json；record本身只登记验收，下一次正式轮询会消费满足门禁的验收自动收尾
 board_review record "$TASK_ID" --controller "$CONTROLLER" \
   --approval-ref "$APPROVAL_REF" --checks-file "$BOARD_ROOT/checks.json"
 board_review close "$TASK_ID" --controller "$CONTROLLER" \
@@ -203,7 +203,7 @@ board_review reopen "$TASK_ID" --controller "$CONTROLLER" \
 `close`记录关联本轮验收哈希及当时worker证据，不会替用户停止worker或批准事项。
 相同审批和内容重跑幂等；重新开启后不得复用旧审批冒充新一轮验收。
 
-同步按“原卡及唯一阶段记录→总览完成/取消分区→归档原thread”顺序执行。
+同步按“原卡及唯一阶段记录→从活动总览移除正常关闭任务→归档原thread”顺序执行。
 已归档closed任务后续轮询只读，不重复编辑/发阶段消息，也不会自动解归档。
 归档成功但回执/本地记账丢失、总览写失败均可重跑恢复，保留原消息ID。
 只有新的总控reopen事件允许解归档一次；普通open任务被人工/自动归档也不会静默解归档，
@@ -384,7 +384,7 @@ python scripts/check --staged
 卡片字段全部`inline:false`，移动端纵向阅读。状态同时用颜色与文字，待决策/失败及高严重观察为红色，
 待核实/待分派/待验收为琥珀色，执行中为蓝色，关闭/重复/暂不处理为灰色；颜色不提升业务结论。
 
-首页分别显示问题、任务、执行窗口计数，优先显示HWB待决策/失败、显式阻塞回传和P0/P1问题。
+首页分别显示活动问题、任务、执行窗口计数，优先显示HWB待决策/失败、显式阻塞回传和P0/P1问题。
 已关联pool的HWB窗口仍参与关注项检测，不因任务去重而隐藏待决策。
 每条短标题、Owner、状态和已有窗口链接；原生链接未登记时明确标缺失，不把HWB状态thread冒充原生会话。
 首页显示数量、关注项数量和完整分页导航；问题按严重级别排序，全部任务目录保留每条任务。
@@ -415,3 +415,40 @@ state丢失后恢复原pool及总览分页ID与最大页数，内容缩短后标
 部署仍由总控独立执行。新增文件必须随其余四个Python脚本一起安装；不改cron、gateway或运维profile。
 真实验收需读回message.embeds并核对原ID、中文分页及权限；再次同步确认零写入。
 旧纯文本迁移和无变化测试已覆盖，不代表真实Discord移动端视觉或当前bot的Embed权限已验收。
+
+## 兼容已部署的确定性自动收尾
+
+正式轮询在既有sync.lock内、Discord同步前执行`auto_close`；仅消费已有独立总控验收，不新增或升级review/checks。
+`--dry-run`仍不执行auto-close、不写state/control、不读凭据或访问Discord。
+此能力是兼容现有部署的收尾流程；不对新问题池启动自主分派、资产操作或新调度器。
+
+`auto_close`继续以`ReviewLog.apply(close)`作为唯一门禁：三层passed/有理由的not_applicable、
+当前meta/events哈希和任务身份未变、无活动状态/存活PID/pending、原卡/thread映射完整、无sync_error。
+worker环境和HWB祖先链仍拒绝写入；审批和完成不能从idle/stopped/last_message/工具退出码推断。
+自动关闭事件controller为`auto-close`，审批引用为`auto-close:<本轮review哈希>`，证据引用原review和原审批。
+重复执行不重复close；reopen后须有新的独立验收。取消仍由总控明确执行，不从文字猜测取消。
+
+总控可单独调用原review CLI，只有本地文件写入，没有Discord请求：
+
+```sh
+/usr/bin/python3 "$BOARD_ROOT/dev_progress_review.py" \
+  --home "$PROFILE_HOME" --state-dir "$BOARD_ROOT" auto-close
+/usr/bin/python3 "$BOARD_ROOT/dev_progress_review.py" \
+  --home "$PROFILE_HOME" --state-dir "$BOARD_ROOT" verify
+```
+
+逐任务结果保留在state.json.last_auto_close.tasks：closed/already_closed/blocked/failed。
+单任务源材料、权限或落盘失败记录failed，其余任务继续；入口身份无法确认、独立账本损坏或投递锚点回退等全局错误停止。
+ReviewLog.apply只扫描当前任务形成快照，避免另一任务的坏材料污染已核验任务；全局身份检查不因此绕过。
+candidates复用真实close门禁，包括源记录变化和映射缺失；verify同时显示上次自动收尾结果。
+总控用三层unverified.reason登记具体未完成原因，必须为文本；卡片和总览保留简短说明，运行态仍优先。
+
+活动总览和HWB活动窗口索引不列、不计正常已完成/已取消项；空时显示“暂无未关闭任务”。
+pool日志及其历史详情、CLI登记总数仍完整保留；活动计数不修改持久化登记量。
+关闭后重新活动/pending的HWB冲突仍进入关注项和活动计数，优先于普通待办，并保留原归档/历史，不自动stop/reopen。
+关联pool的活动任务不重复计HWB任务；正常关闭的pool任务也不留在活动首页，仍可在历史任务页查证。
+现有纯文本overview函数继续保留完整短行、原thread入口、明确遗漏数量及UTF-16最终2000单位预算保护；
+原生Embed使用显式分页达到完整可达，不恢复旧版静默截断行为。原`待总控核验`阶段可恢复，旧标签仅在无control head时兼容更名。
+
+部署前必须比较实际部署模块与候选，不能只比较origin/main；若部署文件有未知差异，先识别、测试合并，再由总控验收。
+保持原sync入口、cron及state/control，不用覆盖旧部署的方式丢弃自动收尾或独立验收保护。
