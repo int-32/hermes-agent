@@ -46,9 +46,6 @@ def _init_git_repo(repo: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-
-
-
 @pytest.mark.platforms("windows")
 def test_cross_process_init_lock_uses_windows_byte_range_lock(tmp_path, monkeypatch):
     """Windows must use a real (non-blocking) process lock, not a no-op open.
@@ -171,21 +168,14 @@ def test_connect_migrates_legacy_db_before_optional_column_indexes(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-
 # ---------------------------------------------------------------------------
 # Links + dependency resolution
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Atomic claim (CAS)
 # ---------------------------------------------------------------------------
-
 
 
 def test_schedule_task_parks_time_delay_without_dispatching(kanban_home):
@@ -198,12 +188,6 @@ def test_schedule_task_parks_time_delay_without_dispatching(kanban_home):
 
         events = kb.list_events(conn, t)
         assert any(e.kind == "scheduled" and e.payload == {"reason": "run next week"} for e in events)
-
-
-
-
-
-
 
 
 def test_stale_claim_reclaim_event_records_diagnostic_payload(
@@ -299,10 +283,6 @@ def test_stale_claim_extend_live_worker_does_not_count_failure(
         assert row["consecutive_failures"] == 0
 
 
-
-
-
-
 # ---------------------------------------------------------------------------
 # Rate-limit requeue: a worker that bails on a provider quota wall must be
 # released back to ``ready`` WITHOUT counting a failure, so a long (e.g.
@@ -315,8 +295,6 @@ def test_stale_claim_extend_live_worker_does_not_count_failure(
 def _exited_status(code: int) -> int:
     """Raw wait-status for a WIFEXITED child with the given exit code."""
     return code << 8
-
-
 
 
 def test_rate_limit_exit_requeues_without_counting_failure(
@@ -424,8 +402,6 @@ def test_terminal_provider_exit_blocks_after_one_attempt_in_either_lane(kanban_h
         # until an operator fixes the provider and unblocks it.
         kb.recompute_ready(conn)
         assert kb.get_task(conn, tid).status == "blocked"
-
-
 
 
 def test_respawn_guard_defers_rate_limited_within_cooldown(
@@ -549,32 +525,18 @@ def test_respawn_guard_ignores_auth_words_in_crashed_worker_output(kanban_home):
         assert kbd.check_respawn_guard(conn, spawn_failed_id) == "blocker_auth"
 
 
-def test_infrastructure_spawn_refusal_never_charges_the_card(
-    kanban_home, monkeypatch, all_assignees_spawnable,
-):
-    """The host refusing to place a worker (managed gateway, user bus gone —
-    #114720) is not a card failure: through the REAL spawn boundary and the
-    real dispatcher accounting, ``consecutive_failures`` stays put, the breaker
-    never parks the card as a bare ``blocked``, the run is tagged
-    ``infrastructure`` and the guard spaces the retries. A control spawn
-    failure on the same card still counts."""
-    from tools import process_registry
+def _spawn_via_restart_safe_boundary(task, workspace, board=None):
+    kbd._restart_safe_worker_argv(task, ["hermes", "chat"])
+    raise AssertionError("unreachable")
 
-    # Explicit systemd unit fixture; this is not Linux host validation.
-    monkeypatch.setattr(process_registry, "_IS_LINUX", True)
-    monkeypatch.setattr(process_registry, "_is_supervised_gateway_process", lambda: True)
-    monkeypatch.setenv("INVOCATION_ID", "managed-gateway")
-    monkeypatch.setattr(process_registry, "_systemd_run_user_scope_available", lambda: False)
+
+def _assert_infrastructure_spawn_accounting(monkeypatch):
+    """Infrastructure refusal preserves budget; ordinary spawn errors still charge it."""
     monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "0")
-
-    def spawn_via_real_boundary(task, workspace, board=None):
-        kbd._restart_safe_worker_argv(task, ["hermes", "chat"])  # raises: real probe verdict, real _degrade()
-        raise AssertionError("unreachable")
-
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="bus is down", assignee="a")
         for _ in range(3):
-            res = kbd.dispatch_once(conn, spawn_fn=spawn_via_real_boundary, failure_limit=2)
+            res = kbd.dispatch_once(conn, spawn_fn=_spawn_via_restart_safe_boundary, failure_limit=2)
             assert res.auto_blocked == []
         row = conn.execute(
             "SELECT status, block_kind, consecutive_failures, last_failure_error FROM tasks WHERE id = ?", (tid,),
@@ -602,20 +564,39 @@ def test_infrastructure_spawn_refusal_never_charges_the_card(
         ).fetchone()[0] == 1
 
 
+def test_infrastructure_spawn_refusal_never_charges_the_card(
+    kanban_home, monkeypatch, all_assignees_spawnable,
+):
+    """Cross-platform accounting at an explicit unavailable-scope dependency, not systemd integration."""
+    from tools import process_registry
+
+    def unavailable_scope(command, *, unit_suffix, require_restart_safe_scope, outlives_parent):
+        assert command == ["hermes", "chat"]
+        assert unit_suffix.startswith("kanban-") and require_restart_safe_scope and outlives_parent
+        raise process_registry.RestartSafeScopeUnavailable(
+            "fixture dependency refusal: user scope unavailable; enable-linger"
+        )
+
+    monkeypatch.setattr(process_registry, "restart_safe_gateway_child_argv", unavailable_scope)
+    _assert_infrastructure_spawn_accounting(monkeypatch)
 
 
+@pytest.mark.platforms("linux")
+def test_systemd_scope_refusal_never_charges_the_card(
+    kanban_home, monkeypatch, all_assignees_spawnable,
+):
+    """Real Linux argv/refusal integration with an unavailable user-scope fixture (#114720)."""
+    from tools import process_registry
 
-
+    monkeypatch.setattr(process_registry, "_is_supervised_gateway_process", lambda: True)
+    monkeypatch.setenv("INVOCATION_ID", "managed-gateway")
+    monkeypatch.setattr(process_registry, "_systemd_run_user_scope_available", lambda: False)
+    _assert_infrastructure_spawn_accounting(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
 # Complete / block / unblock / archive / assign
 # ---------------------------------------------------------------------------
-
-
-
-
-
 
 
 def test_recompute_ready_honours_dispatcher_failure_limit(kanban_home):
