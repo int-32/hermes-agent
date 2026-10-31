@@ -167,7 +167,8 @@ async def submit_document(service, source_key, source_sid, caller_home, request_
             or not await asyncio.to_thread(_continues, source_home, source_sid, actual_sid)):
         raise PermissionError("caller home or bound native turn changed")
     target_key = endpoint(policy, destination)["session_key"]
-    lineage = HANDOFF_LINEAGE.get() or (source_key,)
+    from gateway.native_job import current_lineage
+    lineage = current_lineage() or (source_key,)
     if lineage[-1] != source_key or target_key in lineage or len(lineage) >= 4:
         raise PermissionError("recursive coordination loop refused")
     document = await asyncio.to_thread(document_pointer, policy, task_id, path)
@@ -263,7 +264,8 @@ async def pinned_document_routes(service, record):
 
 
 async def check_legacy_submission(service, source_key, request_id):
-    if HANDOFF_LINEAGE.get():
+    from gateway.native_job import current_lineage
+    if current_lineage():
         raise PermissionError("recursive legacy handoff loop refused")
     policy = coordination_policy(service) if (service.policy.get('coordination') or {}).get('enabled') else {}
     if policy.get("enabled") is True:

@@ -280,12 +280,13 @@ class HandoffService:
                 status = "ambiguous" if current["status"] in {"running", "returning"} else "failed"
                 await asyncio.to_thread(self.journal.update, record["request_id"], status=status, error=type(exc).__name__)
 
-    async def execute(self, record, target):
+    async def execute(self, record, target, *, receiving_turn=None):
         request_id = record["request_id"]
         await asyncio.to_thread(self.journal.update, request_id, status="running")
         from gateway.agent_coordination import handoff_prompt
         prompt = handoff_prompt(self, record)
-        outcome = await self.native_turn(record, target, prompt, record["target_key"], record["target_sid"])
+        outcome = await self.native_turn(record, target, prompt, record["target_key"], record["target_sid"],
+                                         receiving_turn=receiving_turn)
         if outcome.get("error"):
             return await asyncio.to_thread(self.journal.update, request_id, **outcome)
         if not outcome["generated"] or not outcome["delivered"]:
@@ -293,7 +294,7 @@ class HandoffService:
         return await asyncio.to_thread(self.journal.update, request_id, status="generated", response=outcome["response"],
                                        target_message_ids=outcome.get("message_ids", []))
 
-    async def native_turn(self, record, target, prompt, key, sid, *, phase="request"):
+    async def native_turn(self, record, target, prompt, key, sid, *, phase="request", receiving_turn=None):
         """One admitted native model turn; callers own the durable phase transition."""
         request_id = record["request_id"]
         event = MessageEvent(
@@ -305,6 +306,9 @@ class HandoffService:
         receipt = InternalTurnReceipt(asyncio.get_running_loop().create_future(),
                                       {"id": "bot:" + record.get("source_profile", self.policy.get("source_profile", "")),
                                        "name": record.get("source_profile", self.policy.get("source_profile", "")), "is_bot": True})
+        if receiving_turn is not None:
+            from gateway.native_job import PrivateJob
+            receipt.job = PrivateJob(receiving_turn, tuple(record["lineage"]))
         event._internal_turn_receipt = receipt
         adapter = self.runner._delivery_adapter_for(target)
         from gateway.agent_coordination import native_lineage

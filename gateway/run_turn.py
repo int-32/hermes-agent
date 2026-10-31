@@ -25,7 +25,7 @@ from gateway.config import Platform
 from gateway.media_repair import repair_explicit_computer_use_media_paths
 from gateway.platforms.base import BasePlatformAdapter, ProcessingOutcome
 from gateway.platforms.event import MessageEvent
-from gateway.internal_receipt import drain_pending_turn, internal_turn_metadata, invalidate_active_receipt
+from gateway.internal_receipt import event_job, drain_pending_turn, internal_turn_metadata, invalidate_active_receipt
 from gateway.response_filters import (
     display_kind_for_event, display_metadata_for_event, is_machinery_display_kind, reply_expected_metadata,
     silence_allowed,
@@ -264,7 +264,7 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
                 await self._persist_prompt_pins(session_key, _run_start_session_id)
             agent_result = await self._run_agent(
                 message=message_text, context_prompt=prepared.context_prompt, history=history, source=_turn_source,
-                session_id=_run_start_session_id, session_key=session_key,
+                session_id=_run_start_session_id, session_key=session_key, native_job=event_job(event),
                 run_generation=run_generation, event_message_id=self._reply_anchor_for_event(event),
                 inbound_message_id=str(event.message_id) if event.message_id else None,
                 channel_prompt=_turn_channel_prompt, moa_config=getattr(event, "_moa_config", None),
@@ -1964,7 +1964,7 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
 
             followup_result = await self._run_agent(
                 message=next_message, context_prompt=turn_ctx.context_prompt, history=updated_history,
-                source=next_source, session_id=session_id, session_key=next_session_key,
+                source=next_source, session_id=session_id, session_key=next_session_key, native_job=event_job(pending_event),
                 run_generation=run_generation, _interrupt_depth=_interrupt_depth + 1,
                 event_message_id=next_message_id, inbound_message_id=next_inbound_id,
                 channel_prompt=next_channel_prompt, message_type=next_message_type,

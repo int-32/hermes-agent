@@ -268,6 +268,8 @@ async def execute_admission(authority, ref, row):
         # The claim on a chat route (native or a viewer's submit): a /new before the turn resolves
         # its session must not move it onto the fresh conversation (main's /new cancelled its task).
         event._claimed_owner = (ref.session_id, row['generation'])
+    from gateway.native_job import claimed_job
+    event._native_claim = claimed_job(authority, ref, row)
     author = event.metadata.get('turn_author')
     author_token = admission_author.set(author if author is not None else row_turn_author(local_policy, row))
     from gateway.session_operator import is_viewer_input
