@@ -23,6 +23,7 @@ class NativeTurn:
     home: Path
     generation: int | None
     agent: object = None
+    job: object = None
 
 
 NATIVE_TURN = ContextVar("gateway_native_endpoint_turn", default=None)
@@ -197,8 +198,9 @@ async def recover_failed_compression(runner):
 async def run_native_model(runner, message, context_prompt, history, source, sid, turn_kwargs):
     """Own each actual native model scope until exception recovery has also settled."""
     from gateway.session_context import native_model_turn_scope
+    job = turn_kwargs.pop("native_job", None)
     with native_model_turn_scope(runner, source, turn_kwargs.get("session_key") or "", sid,
-                                 turn_kwargs.get("run_generation")):
+                                 turn_kwargs.get("run_generation"), job=job):
         try:
             return await runner._run_agent_inner(message, context_prompt, history, source, sid, **turn_kwargs)
         except Exception:

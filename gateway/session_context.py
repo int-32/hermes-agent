@@ -148,7 +148,7 @@ def source_session_vars(source: Any) -> dict:
 
 @contextmanager
 def native_model_turn_scope(runner: Any, source: Any, session_key: str, session_id: str,
-                            generation: int | None = None) -> Iterator[None]:
+                            generation: int | None = None, *, job=None) -> Iterator[None]:
     """Bind the actual native turn before worker context copies; restore its caller on unwind.
 
     Recursive queued turns share an outer handler, but never its requester proof or profile.
@@ -168,8 +168,10 @@ def native_model_turn_scope(runner: Any, source: Any, session_key: str, session_
             async_delivery=getattr(adapter, "supports_async_delivery", True))
         from gateway.native_endpoint import NATIVE_TURN, NativeTurn
         tokens.extend((_SESSION_NATIVE_SOURCE.set(snapshot), _SESSION_NATIVE_HOME.set(home),
-                       NATIVE_TURN.set(NativeTurn(runner, session_key, session_id, home, generation))))
+                       NATIVE_TURN.set(NativeTurn(runner, session_key, session_id, home, generation, job=job))))
         try:
+            from gateway.native_job import current_job
+            current_job()
             yield
         finally:
             for token in reversed(tokens):

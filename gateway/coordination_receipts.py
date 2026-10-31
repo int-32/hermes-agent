@@ -40,7 +40,8 @@ ASSET_RULE = (
 
 
 def dispatch_context(source_key, request_id):
-    turn = DOCUMENT_TURN.get()
+    from gateway.native_job import current_document_turn
+    turn = current_document_turn()
     if turn is None:
         return {}
     if turn.key != source_key or turn.phase == "origin" or turn.completion:
@@ -58,7 +59,8 @@ async def _complete_turn(service, key, sid, home, request_id, outcome):
     from gateway.agent_handoff import _continues, _same_home, completion_owner, _HANDOFF_OWNER_LOCK
     with _HANDOFF_OWNER_LOCK:
         owner = completion_owner(service)
-    turn = DOCUMENT_TURN.get()
+    from gateway.native_job import current_document_turn
+    turn = current_document_turn()
     if (turn is None or turn.key != key or turn.work["request_id"] != request_id
             or outcome not in {"completed", "blocked", "failed"}):
         raise PermissionError("completion requires this private native document turn and a final outcome")
@@ -130,7 +132,7 @@ async def settlement_changes(service, work, turn, response):
 async def run_request(service, record, target):
     turn = DocumentTurn(record, record["target_key"], record["target_sid"], "request")
     async with document_turn(turn):
-        generated = await service.execute(record, target)
+        generated = await service.execute(record, target, receiving_turn=turn)
     if generated["status"] != "generated":
         return generated
     changes = await settlement_changes(service, generated, turn, generated["response"])
@@ -170,7 +172,7 @@ async def resume_source(service, record, source):
                 "source_profile": record["target_profile"]}
     async with document_turn(turn):
         outcome = await service.native_turn(returned, source, continuation_prompt(record, work, turn.phase),
-                                            record["source_key"], sid, phase=turn.phase)
+                                            record["source_key"], sid, phase=turn.phase, receiving_turn=turn)
     if outcome.get("error"):
         await asyncio.to_thread(service.journal.update, record["request_id"], **outcome)
         return

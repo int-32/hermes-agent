@@ -16,6 +16,7 @@ class InternalTurnReceipt:
     interrupted: bool = False
     message_ids: list[str] = field(default_factory=list)
     first_tool: dict | None = None
+    job: object = None
 
 
 def receipt_for(event):
@@ -153,3 +154,11 @@ def turn_author_for(ctx, fallback=None):
         "id": ctx.source.user_id or None, "name": ctx.source.user_name or None,
         "is_bot": bool(getattr(ctx.source, "is_bot", False)),
     }
+
+def event_job(event):
+    from gateway.native_job import ClaimedJob
+    receipt = receipt_for(event)
+    if receipt is not None and receipt.job is not None:
+        return receipt.job
+    job = getattr(event, '_native_claim', None)
+    return job if isinstance(job, ClaimedJob) else None
