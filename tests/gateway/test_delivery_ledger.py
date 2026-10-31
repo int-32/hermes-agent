@@ -384,6 +384,7 @@ class TestPrune:
 
 
 
+@pytest.mark.usefixtures("isolated_entrypoint_bootstrap")
 class TestGatewayRedeliverySweep:
     """Drive the real GatewayRunner._redeliver_pending_obligations."""
 
@@ -720,6 +721,7 @@ class TestAttemptsOnlySpentOnRealSends:
         assert claimed[0]["attempts"] == 1
 
 
+@pytest.mark.usefixtures("isolated_entrypoint_bootstrap")
 class TestUnconnectedPlatformKeepsItsBudget:
     """End-to-end through the real runner: boots where the platform failed to
     connect must not consume the row's redelivery budget."""

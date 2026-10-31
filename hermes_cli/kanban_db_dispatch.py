@@ -87,19 +87,10 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(
 
 @dataclass
 class DispatchResult:
-    """Outcome of a single ``dispatch`` pass.
+    """One dispatcher pass: outcomes distinguish admission holds from failures."""
 
-    ``kanban.default_assignee`` applied this tick before spawning (#27145). Surfaces the auto-assignment to
-    telemetry / CLI / dashboard so the operator can see when the dispatcher is acting on the fallback rule
-    ``kanban.max_in_progress_per_profile`` (#21582). Each entry is ``(task_id, assignee,
-    current_running_count)``. NOT an operator-actionable failure — the task will be picked up on a
-    subsequent tick when the assignee has capacity. Separate bucket so telemetry / dashboards can show "this
-    profile is busy" vs
-    the board's dispatch lock (issue #35240). A losing dispatcher does no DB writes this tick — the lock
-    holder is making progress on the same board. This is the steady-state signal that a single-writer guard
-    is
-    """
-
+    skipped_tracking_only: bool = False
+    """The board records external state; no native execution or reclaim is permitted."""
     reclaimed: int = 0
     promoted: int = 0
     reconciled_orphans: list[str] = field(default_factory=list)
@@ -170,6 +161,8 @@ def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
             counts[reason] = counts.get(reason, 0) + 1
         if res.rate_limited:
             counts["rate_limited"] = counts.get("rate_limited", 0) + len(res.rate_limited)
+        if res.skipped_tracking_only:
+            counts["tracking_only"] = counts.get("tracking_only", 0) + 1
         if res.skipped_locked:
             counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
         if res.memory_pressure:
@@ -2373,6 +2366,8 @@ def _dispatch_once_locked(
     call ``spawn_fn(task, workspace_path, board) -> Optional[int]``, recording
     the PID so later ticks catch crashes before the TTL. Cap semantics:
     :func:`_tick_spawn_budget`."""
+    if _kb.board_tracking_only(conn):
+        return DispatchResult(skipped_tracking_only=True)
     result = DispatchResult()
     _run_reclaim_phase(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,

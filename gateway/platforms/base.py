@@ -3503,6 +3503,9 @@ class BasePlatformAdapter(ABC):
 
     async def _run_processing_hook(self, hook_name: str, *args: Any, **kwargs: Any) -> None:
         """Run a lifecycle hook without letting failures break message flow."""
+        if hook_name == "on_processing_complete":
+            from gateway.internal_receipt import finish_internal_receipt
+            finish_internal_receipt(*args)
         hook = getattr(self, hook_name, None)
         if not callable(hook):
             return
@@ -4351,9 +4354,7 @@ class BasePlatformAdapter(ABC):
         (a reconnect may have replaced this adapter): record the obligation before the send,
         send with retry, finalize from the result — so a refused final (flood control, a dead
         transport) leaves a ledger row the boot sweep / runtime redelivery can act on. ``event``
-        supplies the source and the ledger identity (``ledger_message_id`` or ``message_id``).
-        Returns the result with the adapter that sent it: that adapter owns ``result.message_id``
-        (an ephemeral delete must go to the same transport)."""
+        supplies the source/ledger identity; the returned adapter owns the message and deletion."""
         delivery_adapter = self._final_delivery_adapter(event.source)
         logger.info("[%s] Sending response (%d chars) to %s", delivery_adapter.name,
                     len(text_content), event.source.chat_id)
@@ -4363,14 +4364,15 @@ class BasePlatformAdapter(ABC):
             await self._release_turn_marker(event)  # the ledger now owns the crash recovery
         result = await delivery_adapter._send_with_retry(
             chat_id=event.source.chat_id, content=text_content, reply_to=reply_to, metadata=metadata)
+        from gateway.internal_receipt import capture_internal_delivery
+        capture_internal_delivery(event, result)
         stop_reply_clock(delivery_adapter, event.source.chat_id, result)
         if obligation_id is not None:
             await self._finalize_delivery_obligation(obligation_id, result, event, delivery_adapter)
         return result, delivery_adapter
 
     async def _release_turn_marker(self, event: MessageEvent) -> None:
-        """Clear the crash marker handed to this delivery lifecycle only once the final reply is ledgered or
-        nothing more is owed (no kill leaves a persisted reply with neither), then wake the drain. Idempotent."""
+        """Release the final's crash marker once ledgered or nothing is owed; then wake the drain."""
         if (getattr(event, "_turn_marker_handoff", False) and getattr(event, "_gateway_active_turn_token", None)
                 and self.gateway_runner is not None):
             await self.gateway_runner._clear_durable_active_turn(event)
@@ -4379,7 +4381,7 @@ class BasePlatformAdapter(ABC):
     async def _send_final_text(
         self, event: MessageEvent, session_key: str, text_content: str, metadata: dict[str, Any],
         is_ephemeral_response: bool, ephemeral_ttl: int, record_delivery: Callable) -> None:
-        """Normal-lane final: the ledger bracket plus the message-id owner's ephemeral delete."""
+        """Ledger final text and schedule deletion on the owning transport."""
         result, delivery_adapter = await self.send_final_ledgered(
             event, session_key, text_content, metadata,
             reply_to=_reply_anchor_for_event(event), is_ephemeral_response=is_ephemeral_response)
@@ -4537,7 +4539,6 @@ class BasePlatformAdapter(ABC):
             if result is not None:
                 delivery_attempted = True
                 delivery_succeeded = delivery_succeeded or bool(getattr(result, "success", False))
-        # Reuse the interrupt event handle_message() installed; new Event only if removed externally.
         interrupt_event = self._active_sessions.get(session_key) or asyncio.Event()
         self._active_sessions[session_key] = interrupt_event
         _thread_metadata = _thread_metadata_for_event(event)
@@ -4546,8 +4547,6 @@ class BasePlatformAdapter(ABC):
             await self._run_processing_hook("on_processing_start", event)
             event._turn_marker_handoff = self.gateway_runner is not None  # it can release the marker
             response = await self._message_handler(event)
-            # A muted diagnostic wake ran for the session; its reply is not presented. The
-            # policy read binds the routed profile; delivery itself stays in the launch scope.
             with self._media_delivery_scope(event.source):
                 if diagnostic_wake_muted(event):
                     response = None
@@ -4558,6 +4557,8 @@ class BasePlatformAdapter(ABC):
             if response and interrupt_event.is_set() and session_key in self._pending_messages:
                 logger.info("[%s] Suppressing stale response for interrupted session %s", self.name,
                             session_key)
+                from gateway.internal_receipt import invalidate_internal_receipt
+                invalidate_internal_receipt(event)
                 response = None
             if not response:
                 logger.debug("[%s] Handler returned empty/None response for %s", self.name, event.source.chat_id)
@@ -4584,15 +4585,9 @@ class BasePlatformAdapter(ABC):
                 if not _tts_paths and _tts_requested_path is not None:
                     with contextlib.suppress(OSError):
                         os.remove(_tts_requested_path)
-                # Suspend the typing refresh before the first delivery attempt, not just in
-                # the turn's finally (#117300): if the final send stalls (platform accepted it
-                # but the HTTP ack never returns), control never reaches the finally, and
-                # _keep_typing keeps refreshing sendChatAction forever while the agent is
-                # already idle and the user can read the answer. Reuse the existing
-                # _typing_paused mechanism: _keep_typing skips paused chats each tick and
-                # _stop_typing_refresh's finally discards it, so it cannot leak into the next
-                # turn. No new await on the delivery path (a fire-and-forget stop task was
-                # measured to have no effect).
+                # Pause refresh before delivery: a platform ack can stall after the final
+                # is visible, leaving typing live if we only stop in finally (#117300).
+                # _keep_typing consumes this flag; _stop_typing_refresh clears it at turn end.
                 if text_content or extracted.images or extracted.media_files or extracted.local_files \
                         or _tts_paths or _tts_caption_delivered:
                     self.pause_typing_for_chat(event.source.chat_id)
@@ -4651,6 +4646,8 @@ class BasePlatformAdapter(ABC):
                 event.source.chat_id, None, metadata=_thread_metadata, stop_attempts=1)
             # Flush any timer that missed the in-band drain, then reconcile ownership.
             await self._flush_text_debounce_now(session_key)
+            from gateway.internal_receipt import promote_owned_internal_overflow
+            promote_owned_internal_overflow(self, event, session_key, interrupt_event)
             self._finish_session_task(session_key, interrupt_event)
 
     _REQUEUE_BACKOFF_INITIAL_SECONDS = 0.25
@@ -4713,7 +4710,9 @@ class BasePlatformAdapter(ABC):
             if pending_event is None:  # consumed elsewhere during the back-off
                 self._cleanup_finished_session_task(session_key, guard)
                 return
-        await self._process_message_background(pending_event, session_key)
+        from gateway.fifo_handoff import fifo_dispatch_scope
+        with fifo_dispatch_scope(self, pending_event, session_key, guard):
+            await self._process_message_background(pending_event, session_key)
 
     def _clear_session_guard(self, session_key: str) -> None:
         """Clear (not delete) the session's interrupt Event so the guard stays live for inbound."""
@@ -4777,7 +4776,8 @@ class BasePlatformAdapter(ABC):
 
     def get_pending_message(self, session_key: str) -> Optional[MessageEvent]:
         """Get and clear any pending message for a session."""
-        return self._pending_messages.pop(session_key, None)
+        from gateway.fifo_handoff import discard_fifo_head
+        return discard_fifo_head(self._pending_messages.pop(session_key, None))
 
     def build_source(
         self, chat_id: str, chat_name: Optional[str] = None, chat_type: str = "dm",

@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("isolated_entrypoint_bootstrap")
+
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.pairing import PairingStore
 from gateway.platforms.base import BasePlatformAdapter

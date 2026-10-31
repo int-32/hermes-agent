@@ -1969,16 +1969,16 @@ DEFAULT_CONFIG = {
         # activity for this many days so stale rows aren't scanned forever. 0 = off.
         "done_sub_retention_days": 30,
     },
-    # Bot Mode cross-connection relay (tools/bot_relay.py): envelopes queued by message_agent for
-    # agents on other connections wait in an on-disk outbox until the Desktop drains them.
+    "agent_handoff": {
+        "enabled": False, "execution_enabled": False,
+        "source_profile": "", "source_parent_channel": "",
+        "target_profile": "default", "target_session_key": "", "coordination": {},
+    },
+    # Cross-connection envelopes wait for Desktop; TTL prevents zombie delivery.
     "bot_mode": {
-        # Drain-time TTL (seconds): older envelopes are NOT delivered on drain; the sender gets an
-        # error reply (reason 'queued_expired') so a DM can't land hours late as a zombie. 0 = no
-        # drain-time expiry (the 6h stale-artifact sweep still applies).
+        # Expired senders get queued_expired. 0 disables expiry, not the 6h artifact sweep.
         "envelope_ttl_seconds": 900,
-        # How long a second delivery into a busy target profile queues behind the current turn
-        # before failing with a structured 'target_busy' error. Deliveries are serialized per
-        # profile with a cross-process file lock.
+        # Per-profile file locks serialize turns; bounded waiting reports target_busy.
         "turn_wait_seconds": 120,
     },
     "code_execution": {  # execute_code settings (programmatic tool calls).

@@ -117,8 +117,11 @@ class HomeIOGuard:
             # The interpreter's own installation (a PM-managed python under ~/.hermes/tools):
             # stdlib source reads (linecache, traceback) are not Hermes state either, nor is
             # realpath() walking up through its ancestors.
+            # A narrower explicitly protected root wins over an enclosing source prefix:
+            # checkout-local test sandboxes must still exercise the same deny rules.
             for prefix in _INTERPRETER_PREFIX_STRS:
-                if _within(absolute, prefix) or (metadata and _contains(absolute, prefix)):
+                if ((_within(absolute, prefix) or (metadata and _contains(absolute, prefix)))
+                        and not any(_within(absolute, root) and _within(root, prefix) for root in roots)):
                     return
             # Check the lexical path first: resolving must not probe a protected
             # tree merely to decide that the original path was forbidden.
@@ -131,7 +134,8 @@ class HomeIOGuard:
                 return
             # A fixture symlink to the running interpreter resolves into its installation.
             for prefix in _INTERPRETER_PREFIX_STRS:
-                if _within(resolved, prefix):
+                if (_within(resolved, prefix)
+                        and not any(_within(resolved, root) and _within(root, prefix) for root in roots)):
                     return
             for root in roots:
                 if _within(resolved, root):

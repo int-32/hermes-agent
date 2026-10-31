@@ -1,0 +1,5 @@
+name: task-handoff-host
+version: "0.1.0"
+description: "Controller-loaded local host for one approved native task registration and the maintained handoff checker. No model tools, sends, dispatch or config writes."
+provides_hooks:
+  - post_gateway_admission

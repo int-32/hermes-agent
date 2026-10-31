@@ -28,6 +28,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("isolated_entrypoint_bootstrap")
+
 from gateway.config import Platform, PlatformConfig, StreamingConfig
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.session import SessionSource

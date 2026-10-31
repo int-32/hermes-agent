@@ -644,6 +644,11 @@
     const [error, setError] = useState(null);
 
     const [tenantFilter, setTenantFilter] = useState("");
+    const [projectFilter, setProjectFilter] = useState("");
+    const [projects, setProjects] = useState([]);
+    useEffect(function () {
+      SDK.fetchJSON(`${API}/projects`).then(function (data) { setProjects(data.projects || []); }).catch(function () { setProjects([]); });
+    }, []);
     const [assigneeFilter, setAssigneeFilter] = useState("");
     const [includeArchived, setIncludeArchived] = useState(false);
     const [search, setSearch] = useState("");
@@ -688,6 +693,7 @@
     const loadBoard = useCallback(() => {
       const qs = new URLSearchParams();
       if (tenantFilter) qs.set("tenant", tenantFilter);
+      if (projectFilter) qs.set("project_id", projectFilter);
       if (includeArchived) qs.set("include_archived", "true");
       const url = qs.toString() ? `${API}/board?${qs}` : `${API}/board`;
       return SDK.fetchJSON(withBoard(url, board))
@@ -700,7 +706,7 @@
           setError(String(err && err.message ? err.message : err));
         })
         .finally(function () { setLoading(false); });
-    }, [tenantFilter, includeArchived, board]);
+    }, [tenantFilter, projectFilter, includeArchived, board]);
 
     // --- load list of boards for the switcher ------------------------------
     const loadBoardList = useCallback(function () {
@@ -1173,6 +1179,7 @@
       // Reset filters so stale search/tenant/assignee don't persist across boards.
       setSearch("");
       setTenantFilter("");
+      setProjectFilter("");
       setAssigneeFilter("");
       setIncludeArchived(false);
       clearSelected();
@@ -1306,14 +1313,16 @@
             return updateBoard(board, payload).then(function () { setShowBoardSettings(false); });
           },
         }) : null,
-        h(OrchestrationPanel, null),
+        boardData && boardData.tracking_only
+          ? h("p", { role: "status", className: "text-sm text-muted-foreground" }, "Tracking only · External lifecycle; native workers are disabled for this board.")
+          : h(OrchestrationPanel, null),
         h(AttentionStrip, {
           boardData,
           onOpen: setSelectedTaskId,
         }),
         h(BoardToolbar, {
           board: boardData,
-          tenantFilter, setTenantFilter,
+          tenantFilter, setTenantFilter, projectFilter, setProjectFilter, projects,
           assigneeFilter, setAssigneeFilter,
           includeArchived, setIncludeArchived,
           laneByProfile, setLaneByProfile,
@@ -2555,6 +2564,13 @@
           className: "w-56 h-8",
         }),
       ),
+      h("div", { className: "flex flex-col gap-1" },
+        h(Label, { className: "text-xs text-muted-foreground" }, "Project"),
+        h(Select, Object.assign({ value: props.projectFilter, className: "h-8", "aria-label": "Project" }, selectChangeHandler(props.setProjectFilter)),
+          h(SelectOption, { value: "" }, "All projects"),
+          (props.projects || []).map(function (project) { return h(SelectOption, { key: project.id, value: project.id }, project.name); }),
+        ),
+      ),
       h("div", { className: "flex flex-col gap-1",
                  title: "Tenants are free-form tags on a task (e.g. customer, project, team). Set them via the task drawer or kanban_create." },
         h(Label, { className: "text-xs text-muted-foreground" }, tx(t, "tenant", "Tenant")),
@@ -2600,6 +2616,7 @@
       h("div", { className: "flex-1" }),
       h(Button, {
         onClick: props.onNudgeDispatch,
+        disabled: !!(props.board && props.board.tracking_only),
         size: "sm",
         title: "Wake the dispatcher to claim ready tasks now instead of waiting for the next tick. Use this after adding tasks if you want them picked up immediately.",
       }, tx(t, "nudgeDispatcher", "Nudge dispatcher")),
@@ -2612,6 +2629,7 @@
         onClick: function () {
           props.setSearch("");
           props.setTenantFilter("");
+          props.setProjectFilter("");
           props.setAssigneeFilter("");
           props.setIncludeArchived(false);
         },

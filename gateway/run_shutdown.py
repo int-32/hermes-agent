@@ -1821,10 +1821,13 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
 
     async def _stop_begin_teardown(self, ctx: GatewayShutdownMixin._StopContext) -> None:
         """Flag teardown, stop room worker/watchdog, notify sessions."""
+        from gateway.agent_handoff import _HANDOFF_OWNER_LOCK
         logger.info("Stopping gateway%s...", " for restart" if self._restart_requested else "")
         ctx.started_at = time.monotonic()
-        self._running = False
-        self._clear_plugin_message_injector()
+        # A committed private receipt must publish memory before its owner is invalidated.
+        with _HANDOFF_OWNER_LOCK:
+            self._running = False
+            self._clear_plugin_message_injector()
         self._draining = True
         from gateway.run_runtime import drain_gateway_runtime
         await drain_gateway_runtime(self)
@@ -1834,14 +1837,11 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         if callable(stop_room_worker):
             try:
                 if not await stop_room_worker(timeout=5.0):
-                    logger.warning(
-                        "Group Chat worker is still settling durable work; the next gateway start will recover it"
-                    )
+                    logger.warning("Group Chat worker is still settling durable work; "
+                                   "the next gateway start will recover it")
             except Exception:
-                logger.warning(
-                    "Group Chat worker could not stop cleanly; the next gateway start will recover durable work",
-                    exc_info=True,
-                )
+                logger.warning("Group Chat worker could not stop cleanly; "
+                               "the next gateway start will recover durable work", exc_info=True)
         stop_watchdog = getattr(self, "_stop_systemd_watchdog", None)
         if callable(stop_watchdog):
             await stop_watchdog()

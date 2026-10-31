@@ -175,6 +175,61 @@ Use the **Move up** and **Move down** arrows beside a room to choose its positio
 - **Plugins can watch members work.** The durable room log records `turn.started` and `turn.settled`; what a member does in between (tools, approvals, streamed text) is projected to plugins through the [`on_room_member_activity`](./features/hooks.md#on_room_member_activity) hook with room, member and turn coordinates, so community clients can build tool cards and live member status on top of Group Chat without reading Hermes internals.
 - **What a member says outside the room still reaches it.** Each member's room session is an ordinary Hermes session (titled `Group: <room> · <thread>`), so you can resume it from the CLI, a routine can post into it, or the Bot's own tools can write to it. When you open the room, and again each time the room drives that member, whatever those writers added since the room last looked — your questions and the member's answers — is posted into the room log under that member's name, once, in the thread the session belongs to; a window restart does not repeat it. The room's own turn prompts and their replies are never duplicated this way, and neither are the agent's housekeeping rows (context compaction notes, routine deliveries, delegation results) or the member's reactions to them. The room starts watching a session the first time it sees it: what was already in that session by then is not replayed, so a room restored on a second Desktop does not re-post its members' history.
 
+## Discord controller handoffs (opt-in compatibility extension)
+
+This gateway extension connects a specialist's Discord thread to an **existing controller
+Discord session**, then returns its final answer to the originating thread. It uses the
+running multiplex gateway's native adapter, agent turn, profile scope and delivery path.
+It does not create a Bot Chat, launch a CLI agent, or change `message_agent`'s Bot Chat gate.
+
+Enable the named `agent_handoff` toolset for the source profile's **new Discord sessions**
+through `hermes tools`, preserving its existing toolsets. The tool is service-gated and is
+not part of the default core bundle. Never patch an existing agent's tool list.
+
+The gateway launch profile owns the policy, written through `hermes config set`:
+
+```yaml
+agent_handoff:
+  enabled: false
+  execution_enabled: false
+  source_profile: specialist
+  source_parent_channel: "DISCORD_PARENT_CHANNEL_ID"
+  target_profile: default
+  target_session_key: "EXISTING_CONTROLLER_GATEWAY_SESSION_KEY"
+```
+
+`enabled` starts the in-process service at gateway startup. `execution_enabled` permits
+model execution and return messages: keep it false until the operator has obtained the
+required model-cost and outbound-message consent. A staged request is only **queued**,
+never proof of execution or delivery. Policy changes take effect on the next controlled
+gateway restart. Regular tool approval, emergency stop, drain and current gateway
+authorization remain in force; handoff text grants no permission to spend or send.
+
+The specialist calls `request_controller(request_id=..., message=...)` from its own bound
+native Discord model turn, then ends that turn. A stable id identifies one task: identical
+retries return its durable status; reusing an id with different content or origin is refused.
+New message IDs in that same authorized thread do not create new work. Session IDs may
+follow only the native database's compression continuation; resets and other forks are refused.
+The tool accepts no caller-supplied profile, channel, or reply destination. Both routes are
+rechecked against current native routing and authorization. A message body, forged environment
+variable, or Bot Chat marker cannot establish the source identity. The controller sees a
+gateway-attributed bot author and an origin envelope; task content is untrusted and cannot
+invoke gateway controls. Controller input arriving during the turn invalidates the handoff
+receipt rather than forwarding a combined conversation to the specialist.
+
+The native adapter must acknowledge admission, the agent must produce a successful model
+result, and the controller's final delivery must complete before the gateway returns that
+result. The return carries `request_id`, source/target profiles and the pinned origin thread.
+It is a Discord message, not another model wake, so it cannot recursively start a handoff.
+
+Receipts live in the launch home's `runtime/agent_handoff.db`. Queued work expires after
+15 minutes; an executing native turn has a 15-minute observation budget. Restart recovery
+returns already-generated results without rerunning the model. A crash during execution or
+return-send, or an unknown send outcome, becomes **ambiguous** and is never automatically
+retried. Inspect the controller and origin threads before manual recovery. This deliberately
+provides at-most-once attempts, not a claim of exactly-once platform delivery. `delivered`
+means a successful platform send receipt; independent Discord readback remains the final check.
+
 ## Bot-to-bot messaging
 
 Bots message each other with attribution, and you can hand work off from any chat:
@@ -393,3 +448,108 @@ Because Bots are profiles, everything has a terminal equivalent:
 | Create / inspect profiles | `hermes profile create`, `hermes profile list` |
 
 See [Profiles](./profiles.md) for the underlying primitive and [Profile Commands](../reference/profile-commands.md) for the full CLI reference.
+
+
+### Two main Discord sessions with document handoffs
+
+The same opt-in compatibility service can add a separate explicit topology using
+`agent_handoff.coordination`. This is for native Discord sessions, not canonical Bot Chats.
+It does not create profiles or add tools to an agent that is already running. Enable the
+existing named `agent_handoff` toolset for both profiles through the normal configuration
+CLI, then coordinate a graceful reload. A `coordinate_session` request accepts `request_id`,
+`task_id`, `handoff_path`, and `target` (`action="request"` is the default).
+
+The operator registers exactly two **real** main channel session keys and session IDs in
+`mains`. Obtain them from the native routing store; never construct a session key from
+a channel ID or use a title/marker as identity. Each main entry has `session_key`,
+`session_id`, and `chat_id`. Tasks come from the native tracking-only `registry` board,
+not `coordination.tasks`. `task_parents` lists permitted parent channels
+per profile. `owner_user_id` and `guild_id` bind every endpoint to the operator's controlled
+Discord space. Missing, reset, ambiguous or rerouted registrations fail closed.
+
+Write the operator-owned mapping through
+`hermes config set agent_handoff.coordination '<JSON mapping>'`, preserving the legacy
+policy leaves. Its fields are `enabled`, `owner_user_id`, `guild_id`, `handoff_root`,
+`mains`, and `task_parents`. The two `mains` keys are the two profile names.
+Keep `enabled=false` until all permission-root bindings are verified.
+Do not enable a placeholder mapping with guessed or null session IDs.
+
+Accept a task once with `hermes kanban source accept --task-id <stable-id>
+--source-key <actual-native-key> --project <native-project-id> --handoff-path
+<absolute-HANDOFF.md> --title <title>`. To adopt an existing card, add
+`--native-id <card-id>`; its project, status and stable identity are preserved.
+This local operator command resolves the real routing entry and the owning profile's
+session row; it accepts no supplied SID, owner identity, records file or task whitelist.
+The immutable source association is an audit event on the card, not a second registry.
+The handoff document namespace can differ from the native project slug; both are pinned
+on acceptance. Body text and comments never grant coordination rights. Existing static
+`tasks` data is historical and is not a fallback when the board/store is unavailable.
+The native service reads card source metadata on each request, so subsequent tasks do
+not require a config edit or restart after this code has been loaded. Loading this code
+itself still follows the normal gateway maintenance boundary.
+
+The allowed edges are deliberately narrow:
+
+- A native card source uses `target="main"` for its owning main, with its own task ID.
+- A main uses `target="task:<task_id>"` for a card source in its own profile.
+- A main uses `target="peer"` for the other main.
+
+No task-to-task or task-to-foreign-main edge exists. Identity comes from the bound native
+turn and current canonical routing, never a tool argument or document. A private turn
+lineage follows native wakes and durable requests: repeated sessions and recursive loops
+are refused. The two-star graph permits at most four distinct sessions in a simple path.
+
+Documents must be regular files at `<handoff_root>/<project>/<task_id>/HANDOFF.md`, no
+larger than 256 KiB. Secure directory-fd walks with no-follow reject traversal and symlinks;
+platforms without those primitives refuse this capability. Only the path, task ID and
+SHA-256 version are queued, never the document body. The hash is rechecked before model
+execution; a changed document needs a new request ID. Once a model has generated a result,
+return delivery can recover without reading or rerunning that model's document. A receiver
+reads the concise handoff first and evidence only as needed; document text never grants
+permissions or justifies reading entire other conversations.
+
+New requests use correlated native continuations. A receiver dispatching another document
+creates a durable child of the **private receiving turn**, not of an ID claimed in text.
+Its parent stays `waiting_children`; its interim reply is never returned as a final result.
+After the child finishes, the gateway wakes the pinned source session to check the result
+and continue the parent work. Finally it wakes the original task to continue development
+and acceptance. A return is a bounded receipt along the existing edge, not a new dispatch
+to an ancestor. Each work request permits at most four child dispatches. Child requests
+retain the parent's task/project, root request ID and native route binding.
+
+Before a receiving or continuation turn finishes, it calls
+`coordinate_session(action="complete", request_id="<work_request_id>", outcome="completed")`.
+Use `blocked` or `failed` instead when appropriate. This action requires the gateway's
+private turn context; a normal turn or document cannot acknowledge another request. Pending
+dependencies prevent completion. A failed/blocked dependency cannot be accepted as completed.
+An ordinary acknowledgement without explicit completion becomes blocked. The actual model
+generation and native final delivery must still succeed after this tool call. Parent settlement
+and child return are committed atomically; busy sources wait without rerunning the target.
+
+`queued`, `running`/`request_admitted_at`, `waiting_children`, `generated`, `returning`,
+`delivered`, `blocked`, `failed`, and `ambiguous` distinguish durable receipt, execution,
+dependency waits and continuation. `outcome`, acknowledgements, root/parent request IDs,
+native session IDs and native final message IDs provide separate evidence. Delivered requires
+native continuation; explicit model completion is still subject to independent business
+acceptance. Prompts carry the request ID and document version and require these in the final
+reply. Busy targets wait. Native compression continuations
+are allowed; resets/forks or changed registrations require explicit recovery. Running or
+returning work after a crash becomes ambiguous and is never automatically replayed.
+An ambiguous/failed child blocks its parent for explicit recovery; it is never silently retried.
+
+Every document ingress and receipt includes the asset division: development tasks report
+server/database/online or offline asset dependencies to their owning main. That main verifies
+the scope and existing authorization, then dispatches the document to independent ops main.
+Ops uses its own native tools and writes sanitized evidence; the main verifies the result
+before the original task resumes. Include safe asset/environment identifiers, requested
+information/action, purpose, impact/limits, authorization source, return location and blocked
+steps. Documents never extend fee/send permissions. Ordinary development tests and Git remain
+with development. Validate this complete dependency chain, not merely independent pings.
+
+Legacy `request_controller`, already completed receipts, and old queued items remain bound
+to their original controller. Already queued v1 document receipts keep their send-only
+return semantics. Unregistered legacy conversations keep their old policy.
+Once a session is explicitly migrated into the new topology, new work must use the document
+tool; it cannot use the legacy tool to bypass its star. An old legacy receipt in that session
+remains queryable by the same request ID/body. Legacy internal wakes cannot recursively
+start new legacy work. Do not rewrite old queue rows to point at the new main sessions.

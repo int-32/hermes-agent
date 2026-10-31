@@ -50,12 +50,13 @@ _BOARD_Q = Query(None, description="Kanban board slug (omit for current)")
 def _ws_upgrade_authorized(ws: WebSocket) -> bool:
     """Authorize a WS upgrade via the dashboard's canonical gate (``web_server_chat._ws_auth_ok``:
     ``?token=`` / ``?ticket=`` / ``?internal=``) so this endpoint can never drift from core
-    auth; accepts when the dashboard isn't importable (bare-FastAPI test harness)."""
+    auth; an unavailable import or gate rejects the upgrade."""
     try:
         from hermes_cli import web_server_chat as _ws
+        return bool(_ws._ws_request_is_allowed(ws) and _ws._ws_auth_ok(ws))
     except Exception:
-        return True
-    return bool(_ws._ws_auth_ok(ws))
+        log.warning("Kanban event authentication unavailable; rejecting upgrade")
+        return False
 
 
 def _normalize_slug_or_400(slug: str) -> Optional[str]:
@@ -290,6 +291,7 @@ def _link_tasks(conn: sqlite3.Connection, links: dict[str, list[str]]) -> list[d
 def get_board(
     tenant: Optional[str] = Query(None, description="Filter to a single tenant"),
     include_archived: bool = Query(False),
+    project_id: Optional[str] = Query(None, description="Native task project id"),
     board: Optional[str] = _BOARD_Q,
     workflow_template_id: Optional[str] = Query(None, description="Restrict to tasks using this workflow template id"),
     current_step_key: Optional[str] = Query(None, description="Restrict to tasks at this workflow step key")):
@@ -297,7 +299,7 @@ def get_board(
     (``HERMES_KANBAN_BOARD`` env → on-disk ``current`` pointer → ``default``)."""
     with _board_conn(board) as (board, conn):
         tasks = kanban_db.list_tasks(
-            conn, tenant=tenant, include_archived=include_archived,
+            conn, tenant=tenant, include_archived=include_archived, project_id=project_id,
             workflow_template_id=workflow_template_id, current_step_key=current_step_key)
         # Link / comment / progress rollups are each one aggregate query rather than N per-task lookups.
         link_counts: dict[str, dict[str, int]] = {}
@@ -350,7 +352,7 @@ def get_board(
         assignees = [entry["name"] for entry in kanban_db.known_assignees(conn)]
         return {
             "columns": [{"name": name, "tasks": columns[name]} for name in columns], "tenants": tenants,
-            "assignees": assignees, "latest_event_id": int(latest_event_id), "now": int(time.time())}
+            "assignees": assignees, "tracking_only": kanban_db.board_tracking_only(conn), "latest_event_id": int(latest_event_id), "now": int(time.time())}
 
 
 _read_board = coalesced_read(get_board)
@@ -360,13 +362,14 @@ _read_board = coalesced_read(get_board)
 async def get_board_endpoint(
     tenant: Optional[str] = Query(None, description="Filter to a single tenant"),
     include_archived: bool = Query(False),
+    project_id: Optional[str] = Query(None, description="Native task project id"),
     board: Optional[str] = _BOARD_Q,
     workflow_template_id: Optional[str] = Query(None, description="Restrict to tasks using this workflow template id"),
     current_step_key: Optional[str] = Query(None, description="Restrict to tasks at this workflow step key"),
 ):
     # Resolve selection before keying so a board switch cannot join an older read.
     return await _read_board(
-        tenant=tenant,
+        tenant=tenant, project_id=project_id,
         include_archived=include_archived,
         board=board or kanban_db.get_current_board(),
         workflow_template_id=workflow_template_id,
@@ -607,6 +610,9 @@ def _apply_status(conn, task_id: str, s: str, p, unknown_detail: str) -> bool:
     """Dispatch a status verb; raises ``_StatusRejected`` (user-facing message)
     for ``running`` or an unknown status (``unknown_detail``)."""
     if s == "running":
+        if kanban_db.board_tracking_only(conn):
+            return kanban_db.observe_tracking_task(
+                conn, task_id, s, actor="dashboard", evidence={"source": "manual dashboard change"})
         raise _StatusRejected(_RUNNING_DIRECT_MSG)
     handler = _STATUS_HANDLERS.get(s)
     if handler is None:

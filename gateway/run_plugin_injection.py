@@ -29,12 +29,17 @@ class GatewayPluginInjectionMixin:
         from hermes_cli.plugins import publish_gateway_message_host
 
         publish_gateway_message_host(self, self._schedule_plugin_message_injection)
+        # Both in-process message services share the published gateway host's lifetime.
+        from gateway.agent_handoff import install_handoff_service
+        install_handoff_service(self)
 
     def _clear_plugin_message_injector(self) -> None:
         """Remove this runner's scheduler without clobbering a newer owner."""
         from hermes_cli.plugins import clear_published_gateway_message_host
 
         clear_published_gateway_message_host(self)
+        from gateway.agent_handoff import clear_handoff_service
+        clear_handoff_service(self)
 
     def _schedule_plugin_message_injection(
         self, *, content: str, plugin_id: str, session_key: Optional[str] = None,

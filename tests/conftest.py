@@ -130,6 +130,10 @@ if _HERMES_EXPORTED_TMP:
 from hermes_state_guard import _real_platform_state_root
 
 _real_test_root = _real_platform_state_root() or (Path.home() / ".hermes").resolve()
+_runner_scratch = os.environ.get("HERMES_TEST_RUNNER_SCRATCH", "")
+_RUNNER_SCRATCH = Path(_runner_scratch).resolve() if _runner_scratch else None
+if _RUNNER_SCRATCH is not None and not _RUNNER_SCRATCH.is_relative_to(PROJECT_ROOT.resolve()):
+    raise RuntimeError("runner scratch must remain inside the checkout; real-home guard is never widened")
 _guarded_tmp_roots = [_real_test_root]
 _custom_test_home = os.environ.get("HERMES_HOME")
 if _custom_test_home:
@@ -138,9 +142,12 @@ for _key in SCRATCH_TMP_ENV_VARS:
     _value = os.environ.get(_key)
     if _value:
         _path = Path(_value).expanduser().resolve()
-        if any(_path.is_relative_to(_root) for _root in _guarded_tmp_roots):
+        runner_owned = _RUNNER_SCRATCH is not None and _path == _RUNNER_SCRATCH
+        if not runner_owned and any(_path.is_relative_to(_root) for _root in _guarded_tmp_roots):
             del os.environ[_key]
 tempfile.tempdir = None  # re-resolve after stripping guarded temp directories
+if _RUNNER_SCRATCH is not None:
+    os.environ.setdefault("TMPDIR", str(_RUNNER_SCRATCH))
 os.environ.setdefault("TMPDIR", tempfile.gettempdir())
 
 if _hermes_home_points_at_production(os.environ.get("HERMES_HOME", "")):
@@ -151,6 +158,17 @@ if _hermes_home_points_at_production(os.environ.get("HERMES_HOME", "")):
     # sandbox in the env and must not register it as a guarded "real" root.
     os.environ["HERMES_TEST_SANDBOX_HOME"] = _SESSION_HERMES_HOME
     atexit.register(shutil.rmtree, _SESSION_HERMES_HOME, True)
+
+if _RUNNER_SCRATCH is not None:
+    # Collection can resolve profiles before fixtures run. Redirect only Hermes's native
+    # default; HOME and the guard's independent production-root capture stay untouched.
+    import hermes_constants as _scratch_constants
+
+    def _collection_platform_default():
+        native = _get_platform_default_hermes_home()
+        return _RUNNER_SCRATCH / "native-home" / native.name if native.parent == _NATIVE_HERMES_PARENT else native
+
+    _scratch_constants._get_platform_default_hermes_home = _collection_platform_default
 
 # PYTHONPYCACHEPREFIX is a bytecode-mirror escape hatch: when set (the
 # bundled desktop app exports it as %LOCALAPPDATA%\hermes\pycache),
@@ -254,6 +272,15 @@ from tests._fixtures.model_peer import model_peer  # fixture registers here
 from tests._fixtures.platform_gating import _platforms_gate_reason, _reject_contradictory_platform_marks
 
 
+@pytest.fixture
+def isolated_entrypoint_bootstrap(monkeypatch):
+    """The runner supplies dependencies; gateway contracts do not repair an installation."""
+    monkeypatch.setattr("hermes_cli._early_recovery.restore_interrupted_pull", lambda *_: False)
+    monkeypatch.setattr("hermes_cli._early_recovery.recover_if_needed", lambda *_: None)
+    monkeypatch.setattr("hermes_cli.venv_sync.prepare_launch", lambda *_: None)
+    monkeypatch.setattr("pm.environments.activate_dependencies", lambda *_: None)
+
+
 @pytest.fixture(autouse=True)
 def _hermetic_environment(tmp_path, tmp_path_factory, monkeypatch):
     """Blank out all credential/behavioral env vars so local and CI match.
@@ -285,7 +312,8 @@ def _hermetic_environment(tmp_path, tmp_path_factory, monkeypatch):
     #    a stable HOME. Hardcoded real-home I/O must still trip the guard.
     import hermes_constants
 
-    platform_default = hermes_constants._get_platform_default_hermes_home
+    platform_default = (_get_platform_default_hermes_home if _RUNNER_SCRATCH is not None
+                        else hermes_constants._get_platform_default_hermes_home)
 
     def isolated_platform_default() -> Path:
         root = platform_default()

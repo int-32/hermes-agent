@@ -1168,21 +1168,18 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
         return _handled, _result
 
     def _hm_rescue_orphaned_fifo(
-        self, event: MessageEvent, source: SessionSource, is_internal: bool, _quick_key: str
+        self, event: MessageEvent, source: SessionSource, is_internal: bool, _quick_key: str, *, fifo_head=None
     ) -> tuple[MessageEvent, SessionSource, bool]:
-        """FIFO orphan rescue: a session that went idle with a populated overflow (post-turn drain
-        never promoted, e.g. a compression-demoted follow-up) silently orphaned those events. The
-        oldest orphan runs as THIS turn and the incoming event is parked behind the chain. Skipped
-        for control commands and internal events."""
+        """Run old orphans before fresh arrivals after a turn exits without promotion.
+        The fresh arrival is parked behind them. Control/internal events and one-use
+        heads transferred by this FIFO retain their own execution paths."""
         try:
-            # ── FIFO orphan rescue (#99882) ──────────────────────────────── If this session went idle with
-            # a populated overflow (queued during a busy window whose post-turn drain never promoted — e.g.
-            # a compression-demoted follow-up after the compression window ended through an exit that
-            # skipped the promotion site), those events were silently orphaned. We are starting the next
-            # turn for this session NOW: re-stage the orphans in FIFO order and enqueue the incoming event
-            # behind them, so arrival order (#28503) holds: oldest orphan runs as this turn, the rest drain
-            # in order, the new message last.
+            from gateway.fifo_handoff import consume_fifo_head
             _orphan_adapter = self._delivery_adapter_for(source)
+            if consume_fifo_head(self, _orphan_adapter, _quick_key, fifo_head):
+                return event, source, is_internal
+            # A fresh arrival rescues old orphans and goes behind them (#99882).
+            # A transferred FIFO head was already selected; rescuing again inverts it.
             if _orphan_adapter is None or getattr(event, "internal", False) or event.get_command():
                 return event, source, is_internal
             _rescued = self._rescue_orphaned_overflow(_quick_key, _orphan_adapter)
@@ -1243,6 +1240,8 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
         """Handle an incoming message from any platform: auth → command check → running-agent
         interrupt → get/create session → build context → run agent → return response."""
         from gateway.run import _AGENT_PENDING_SENTINEL
+        from gateway.fifo_handoff import claim_fifo_head
+        fifo_head = claim_fifo_head(self, event)
         _admitted = await self._hm_admit_event(event)
         if _admitted is None:
             return None
@@ -1306,7 +1305,8 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
             logger.info("Rejecting new active session %s: max_concurrent_sessions reached", _quick_key)
             return _limit_message
 
-        event, source, is_internal = self._hm_rescue_orphaned_fifo(event, source, is_internal, _quick_key)
+        event, source, is_internal = self._hm_rescue_orphaned_fifo(
+            event, source, is_internal, _quick_key, fifo_head=fifo_head)
 
         _claim_state = self._session_state(_quick_key)
         if _active_session_lease is not None:

@@ -951,6 +951,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 kwargs["turn_author"] = (api.get('turn_author') if api is not None else
                     admission_author.get() or {"id": ctx.source.user_id or None, "name": ctx.source.user_name or None,
                                                "is_bot": bool(getattr(ctx.source, "is_bot", False))})
+                from gateway.internal_receipt import turn_author_for
+                kwargs["turn_author"] = turn_author_for(ctx, kwargs["turn_author"])
             if ctx.title_user_message is not None:
                 kwargs["title_user_message"] = ctx.title_user_message
             if persist_user_message_override is not None:
@@ -1265,6 +1267,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         agent, reused_cached_agent = self._resolve_turn_agent(
             turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr,
         )
+        runner._verify_native_turn_agent(ctx, agent)
         if pending_fallback_notice:
             # Reuse the in-agent one-shot notice so the pre-agent provider switch is user-visible too.
             agent._pending_fallback_notice = pending_fallback_notice

@@ -126,6 +126,8 @@ def _profile_author(default: str = "specifier") -> str:
 def _load_triage_task(task_id: str) -> tuple[Optional[kb.Task], str]:
     """``(task, "")`` when the task exists and is in triage, else ``(None, reason)``."""
     with kbc.connect_closing() as conn:
+        if kb.board_tracking_only(conn):
+            return None, 'tracking-only board: native specification/decomposition is disabled'
         task = kb.get_task(conn, task_id)
     if task is None:
         return None, "unknown task id"

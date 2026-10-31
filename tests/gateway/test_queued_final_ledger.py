@@ -28,6 +28,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("isolated_entrypoint_bootstrap")
+
 from gateway import delivery_ledger as dl
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, SendResult

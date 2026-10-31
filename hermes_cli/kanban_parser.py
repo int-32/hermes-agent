@@ -106,6 +106,7 @@ _BOARD_SPECS = [
         _arg("--icon", help="Optional emoji or single-character icon for the dashboard"),
         _arg("--color", help="Optional hex color (e.g. '#8b5cf6') for the dashboard"),
         _arg("--switch", action="store_true", help="Switch to the new board after creating it"),
+        _arg("--tracking-only", action="store_true", default=None, help="Record external lifecycle states; never dispatch native work (empty boards only)"),
         _arg("--default-workdir", help="Default workspace path for tasks created on this board"),
     ], aliases=["new"], help="Create a new board"),
     _cmd("rm", [
@@ -148,6 +149,11 @@ _BOARD_SPECS = [
 
 # Top-level ``hermes kanban <action>`` records, in ``--help`` order.
 _SPECS = [
+    _cmd('source', [_arg('source_args', nargs=argparse.REMAINDER)],
+         help='Accept/observe native task cards without independent registration files'),
+    _cmd('registry', [_arg('--config', type=str, required=True), _arg('--records', type=str, required=True),
+                      _arg('registry_command', choices=('plan', 'register', 'sync', 'verify'))],
+         help='Register explicit external sources on a tracking-only native board'),
     _cmd("init", help="Create kanban.db if missing (idempotent)"),
     _cmd("boards", children=("boards_action", _BOARD_SPECS),
          help="Manage kanban boards (one board per project / workstream)",
@@ -233,6 +239,7 @@ _SPECS = [
     ], help="Create a Kanban Swarm v1 graph (parallel workers → verifier → synthesizer)"),
     _cmd("list", [
         _arg("--mine", action="store_true", help="Filter by $HERMES_PROFILE as assignee"),
+        _arg("--project", help="Filter by native project id (hermes projects list --json)"),
         _arg("--assignee"),
         _arg("--status", choices=sorted(kb.VALID_STATUSES)),
         _arg("--tenant"),

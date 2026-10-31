@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("isolated_entrypoint_bootstrap")
+
 aiohttp = pytest.importorskip("aiohttp")
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -35,6 +37,8 @@ LOKAJ_KEY = "lokaj-key-1234567890abcdef"
 @pytest.fixture()
 def hermes_root(tmp_path, monkeypatch):
     """Two real profile homes: default (owner) and 'lokaj' (secondary)."""
+    # Host browser-package discovery is outside this HTTP/profile toolset contract.
+    monkeypatch.setattr("hermes_cli.nous_subscription._has_agent_browser", lambda: False)
     root = tmp_path / "hermes"
     lokaj = root / "profiles" / "lokaj"
     lokaj.mkdir(parents=True)

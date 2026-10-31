@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import time
+import sqlite3
 from typing import Any
 from typing import Optional
 from pathlib import Path
@@ -63,6 +64,11 @@ def read_board_metadata(board: Optional[str] = None) -> dict:
     except (OSError, json.JSONDecodeError):
         pass
     meta["db_path"] = str(_kb.kanban_db_path(slug))
+    from hermes_cli.kanban_db_tracking import read_tracking_metadata
+    try:
+        meta["tracking_only"] = read_tracking_metadata(Path(meta["db_path"]).resolve())
+    except (OSError, sqlite3.Error, ValueError):
+        meta["tracking_only"] = None
     return meta
 
 
@@ -79,6 +85,7 @@ def write_board_metadata(
     meta = read_board_metadata(slug)
     # db_path is derived on every read; never persist it into board.json.
     meta.pop("db_path", None)
+    meta.pop("tracking_only", None)
     if name is not None:
         meta["name"] = str(name).strip() or _default_board_display_name(slug)
     for key, value in (("description", description), ("icon", icon), ("color", color)):
@@ -103,20 +110,24 @@ def write_board_metadata(
 def create_board(
     slug: str, *, name: Optional[str] = None, description: Optional[str] = None,
     icon: Optional[str] = None, color: Optional[str] = None, default_workdir: Optional[str] = None,
-    project_id: Optional[str] = None,
+    project_id: Optional[str] = None, tracking_only: Optional[bool] = None,
 ) -> dict:
     """Create board dir + DB + metadata (``mkdir -p`` semantics: existing board returns its metadata)."""
     normed = _kb._require_slug(slug)
     # Explicit creation clears any archived tombstone at this slug (left by
     # remove_board(archive=True)) — otherwise _kb.init_db() below would rightly
     # refuse to recreate the archived board's DB (#43243).
-    meta = write_board_metadata(
+    write_board_metadata(
         normed, name=name, description=description, icon=icon, color=color,
         default_workdir=default_workdir, project_id=project_id, archived=False,
     )
     # Touch the DB so list_boards() sees it immediately.
     _kb.init_db(board=normed)
-    return meta
+    if tracking_only is not None:
+        from hermes_cli.kanban_db_connect import connect_closing
+        with connect_closing(board=normed) as conn:
+            _kb.set_board_tracking_only(conn, tracking_only)
+    return read_board_metadata(normed)
 
 
 def list_boards(*, include_archived: bool = True) -> list[dict]:

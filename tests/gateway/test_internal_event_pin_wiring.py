@@ -18,6 +18,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("isolated_entrypoint_bootstrap")
+
 from gateway.config import ChannelOverride, GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent
 from gateway.run_turn_runner import TurnRunner

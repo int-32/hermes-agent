@@ -33,6 +33,20 @@ _OVERRIDE_APPLY_KEYS = (
 )
 
 
+def _compression_followup_count(agent, home, parent, child):
+    """Read the actual executing agent's DB, requiring its live canonical compression tip."""
+    db = getattr(agent, "_session_db", None)
+    path = getattr(db, "db_path", None)
+    if (getattr(agent, "session_id", None) != child or path is None
+            or Path(path).resolve() != (Path(home) / "state.db").resolve()):
+        raise PermissionError("queued compression agent belongs to another session/home")
+    row = db.get_session(child)
+    if (not row or row.get("ended_at") is not None
+            or db.get_compression_tip(parent) != child):
+        raise PermissionError("queued session change is not a live compression continuation")
+    return row.get("message_count", 0)
+
+
 def _first_agent(entry: Any) -> Any:
     """Unwrap a cache entry (``(agent, sig, ...)`` tuple or bare agent) to its agent."""
     return entry[0] if isinstance(entry, tuple) and entry else entry
@@ -602,6 +616,65 @@ class GatewayAgentCacheMixin:
             # Guarded release: a message that arrived during the awaits above may already run as
             # the successor generation — the displaced /stop tail must not wipe its slot.
             self._drop_turn_slot(session_key, run_generation=_generation_at_interrupt)
+
+    async def _effective_followup_session_id(self, ctx, result, pending_event) -> str:
+        """Adopt only this completed turn's published compression child, never a routing switch."""
+        from gateway.session_context import _SESSION_KEY, _SESSION_ID, _SESSION_NATIVE_HOME
+        from gateway.agent_handoff import _same_home
+        candidate = result.get("session_id") or ctx.session_id
+        if candidate == ctx.session_id:
+            return ctx.session_id
+        home = _SESSION_NATIVE_HOME.get()
+        source = getattr(pending_event, "source", None) or ctx.source
+        agent = ctx.agent_holder[0]
+        if (not isinstance(candidate, str) or home is None or ctx.run_generation is None
+                or _SESSION_KEY.get() != ctx.session_key or _SESSION_ID.get() != ctx.session_id
+                or self._session_key_for_source(source) != ctx.session_key
+                or not _same_home(home, self._resolve_profile_home_for_source(source))
+                or not _same_home(home, self._resolve_profile_home_for_source(ctx.source))
+                or not self._is_session_run_current(ctx.session_key, ctx.run_generation)):
+            raise PermissionError("queued continuation lost its native key/home/generation")
+        from gateway.native_endpoint import effective_endpoint
+        try:
+            _, effective_sid = await effective_endpoint(self, ctx.session_key)
+        except PermissionError as exc:
+            raise PermissionError("queued endpoint refused: " + str(exc)) from exc
+        entry = await self.async_session_store.lookup_by_session_key(ctx.session_key)
+        from asyncio import to_thread
+        count = await to_thread(_compression_followup_count, agent, home, ctx.session_id, candidate)
+        if not entry or entry.session_id != candidate or effective_sid != candidate:
+            raise PermissionError("queued compression result disagrees with the session store")
+        cache, lock = getattr(self, "_agent_cache", None), getattr(self, "_agent_cache_lock", None)
+        with lock if lock is not None else nullcontext():
+            live = self.session_store._entries.get(ctx.session_key)
+            cached = cache.get(ctx.session_key) if cache is not None else None
+            if (not self._is_session_run_current(ctx.session_key, ctx.run_generation)
+                    or not live or live.session_id != candidate or agent.session_id != candidate
+                    or (cached is not None and (not isinstance(cached, tuple) or len(cached) < 4 or cached[0] is not agent
+                        or cached[3] not in {ctx.session_id, candidate}))):
+                raise PermissionError("queued compression publication changed before adoption")
+            if cached is not None:
+                cache[ctx.session_key] = (agent, cached[1], count, candidate)
+        return candidate
+
+    def _verify_native_turn_agent(self, ctx, agent) -> None:
+        """A cache hit cannot silently switch the model away from its native turn binding."""
+        from gateway.session_context import _SESSION_NATIVE_SOURCE, _SESSION_KEY, _SESSION_ID, _SESSION_NATIVE_HOME
+        from hermes_constants import get_hermes_home
+        from gateway.agent_handoff import _same_home
+        if _SESSION_NATIVE_SOURCE.get() is None:
+            return
+        home = _SESSION_NATIVE_HOME.get()
+        path = getattr(getattr(agent, "_session_db", None), "db_path", None)
+        if (_SESSION_KEY.get() != ctx.session_key or _SESSION_ID.get() != ctx.session_id
+                or getattr(agent, "session_id", ctx.session_id) != ctx.session_id
+                or home is None or not _same_home(home, get_hermes_home())
+                or (path is not None and Path(path).resolve() != (Path(home) / "state.db").resolve())
+                or (ctx.run_generation is not None
+                    and not self._is_session_run_current(ctx.session_key, ctx.run_generation))):
+            raise PermissionError("resolved agent disagrees with the current native session/generation")
+        from gateway.native_endpoint import bind_native_agent
+        bind_native_agent(self, ctx, agent)
 
     async def _refresh_agent_cache_message_count(self, session_key: str, session_id: Optional[str]) -> None:
         """Re-baseline a cached agent's stored message_count after THIS turn — the coherence guard

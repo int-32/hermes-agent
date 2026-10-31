@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures('isolated_entrypoint_bootstrap')
+
 
 def _policy(tmp_path):
     from gateway.session_local import _bypass_policy

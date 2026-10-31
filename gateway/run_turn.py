@@ -25,6 +25,7 @@ from gateway.config import Platform
 from gateway.media_repair import repair_explicit_computer_use_media_paths
 from gateway.platforms.base import BasePlatformAdapter, ProcessingOutcome
 from gateway.platforms.event import MessageEvent
+from gateway.internal_receipt import drain_pending_turn, internal_turn_metadata, invalidate_active_receipt
 from gateway.response_filters import (
     display_kind_for_event, display_metadata_for_event, is_machinery_display_kind, reply_expected_metadata,
     silence_allowed,
@@ -197,8 +198,6 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
             return False
 
 
-
-
     async def _hmwa_stop_typing_for_turn(self, event, source):
         """Stop the typing indicator (never raises). Slack AI status is scoped to a thread/
         workspace, so preserve the routing metadata used by the response delivery path."""
@@ -209,7 +208,6 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
                 await _typing_adapter._stop_typing_with_metadata(source.chat_id, self._event_thread_metadata(event, source))
             elif _typing_adapter and callable(getattr(_kind, "stop_typing", None)):
                 await _typing_adapter.stop_typing(source.chat_id)
-
 
 
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
@@ -277,7 +275,8 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
                 reply_expected=event.reply_expected,
                 persist_user_display_metadata={
                     "gateway_input_owner": prepared.persistence_owner, **display_metadata_for_event(event),
-                    **reply_expected_metadata(event.reply_expected), **diagnostic_metadata(event)},
+                    **reply_expected_metadata(event.reply_expected), **diagnostic_metadata(event),
+                    **internal_turn_metadata(event)},
                 message_type=event.message_type,
                 scheduled_heartbeat=bool(getattr(event, "_heartbeat_session_id", None)),
             )
@@ -995,10 +994,9 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
         self, message: str, context_prompt: str, history: list[dict[str, Any]],
         source: SessionSource, session_id: str, **turn_kwargs,
     ) -> dict[str, Any]:
-        """Profile-scoping wrapper around ``_run_agent_inner`` (same keyword parameters; pass-through
-        when multiplexing is off)."""
-        with self._profile_scope_for_source(source):
-            return await self._run_agent_inner(message, context_prompt, history, source, session_id, **turn_kwargs)
+        """Bind each actual model turn, including recursive FIFO follow-ups."""
+        from gateway.native_endpoint import run_native_model
+        return await run_native_model(self, message, context_prompt, history, source, session_id, turn_kwargs)
 
     def _run_agent_display_settings(self, source: SessionSource) -> GatewayRunner._RunAgentDisplay:
         """Resolve per-platform display, progress, status and streaming-surface settings for a turn."""
@@ -1736,7 +1734,8 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
         # Leftover /steer (arrived after the last tool batch): deliver as the next user turn.
         pending_event, pending = self._merge_leftover_steer(result, adapter, source, session_key, pending_event, pending)
 
-        # Safety net: a pending slash command is never passed to the agent as user input.
+        invalidate_active_receipt(self, session_key, result, pending_event, pending)
+        # A pending slash command is never passed to the agent as user input.
         if pending and pending.strip().startswith("/"):
             _pending_cmd_word = pending.strip().split(None, 1)[0][1:].lower()
             if _pending_cmd_word:
@@ -1961,6 +1960,7 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
         # (the helper's own ``except Exception`` does not catch cancellation).
         try:
             await self._refresh_agent_cache_message_count(session_key, session_id)
+            session_id = await self._effective_followup_session_id(turn_ctx, result, pending_event)
 
             followup_result = await self._run_agent(
                 message=next_message, context_prompt=turn_ctx.context_prompt, history=updated_history,
@@ -2387,7 +2387,7 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
             result = turn_ctx.result_holder[0]
             adapter = self._delivery_adapter_for(source)
             await self._run_agent_finalize_streaming_tts(turn_ctx, adapter)
-            pending_event, pending = await self._run_agent_drain_pending(result, adapter, source, session_key)
+            pending_event, pending = await drain_pending_turn(self, result, adapter, source, session_key)
             if pending_event or pending:
                 return await self._run_agent_queued_followup(
                     turn_ctx, adapter, pending, pending_event, response, result, stream_task,

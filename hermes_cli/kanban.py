@@ -155,6 +155,12 @@ def kanban_command(args: argparse.Namespace) -> int:
 
     # `boards …` manages board metadata and the current-board pointer itself, so it must ignore
     # the `--board` routing override (else `--board beta boards show` reports beta).
+    if action == 'source':
+        from hermes_cli.kanban_source import main as source_main
+        return source_main(args.source_args)
+    if action == 'registry':
+        from scripts.kanban_registry_sync import main as registry_main
+        return registry_main(['--config', args.config, '--records', args.records, args.registry_command])
     if action == "boards":
         return _dispatch_boards(args)
 
@@ -427,6 +433,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
             conn, assignee=assignee, status=args.status, tenant=args.tenant, session_id=args.session,
             include_archived=args.archived, order_by=getattr(args, "sort", None),
             workflow_template_id=args.workflow_template_id, current_step_key=args.current_step_key,
+            project_id=getattr(args, "project", None),
         )
     if _json_out(args, [_task_to_dict(t) for t in tasks]):
         return 0

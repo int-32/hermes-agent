@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("isolated_entrypoint_bootstrap")
+
 
 def _real_hermes_home() -> Path:
     """Where the operator's logs live, ignoring any test sandboxing."""

@@ -119,10 +119,21 @@ class GatewayBusySessionMixin:
         pending_slot = getattr(adapter, "_pending_messages", None) if adapter is not None else None
         if pending_slot is None:
             return
+        from gateway.fifo_handoff import discard_fifo_head, stage_fifo_head
+        discard_fifo_head(queued_event)
+        overflow = self._overflow_queue(session_key)
+        # Only a live Base owner drains a transferred head under its FIFO scope.
+        # If busy admission became idle across an await, Base starts fresh intake
+        # without that scope; leave old orphans for its normal ingress rescue.
+        owner = getattr(adapter, "_session_tasks", {}).get(session_key)
+        guarded = getattr(adapter, "_active_sessions", {}).get(session_key) is not None
+        if (session_key not in pending_slot and overflow and guarded
+                and isinstance(owner, asyncio.Task) and not owner.done()):
+            stage_fifo_head(self, adapter, session_key, overflow.pop(0))
         if session_key in pending_slot:
             self._session_state(session_key).conversation.queued_events.append(queued_event)
         else:
-            pending_slot[session_key] = queued_event
+            stage_fifo_head(self, adapter, session_key, queued_event)
         queued_event._gateway_accepted = True
 
     def _promote_queued_event(
@@ -136,10 +147,11 @@ class GatewayBusySessionMixin:
         overflow = self._overflow_queue(session_key)
         if not overflow:
             return pending_event
+        from gateway.fifo_handoff import discard_fifo_head, stage_fifo_head
         if pending_event is None:
-            return overflow.pop(0)
+            return discard_fifo_head(overflow.pop(0))
         if adapter is not None and hasattr(adapter, "_pending_messages"):
-            adapter._pending_messages[session_key] = overflow.pop(0)
+            stage_fifo_head(self, adapter, session_key, overflow.pop(0))
         # else: no adapter — leave the head in place so we don't silently drop it.
         return pending_event
 
@@ -238,11 +250,12 @@ class GatewayBusySessionMixin:
             pending_slot = getattr(adapter, "_pending_messages", None)
             if not isinstance(pending_slot, dict) or pending_slot.get(session_key):
                 return None  # slot occupied (busy) or no slot storage — promotion owns this
-            head = overflow.pop(0)
+            from gateway.fifo_handoff import discard_fifo_head, stage_fifo_head
+            head = discard_fifo_head(overflow.pop(0))
             # Keep the slot occupied so the drain promotes in order and a mid-chain arrival routes
             # to overflow instead of jumping the queue (same invariant as _promote_queued_event).
             if overflow:
-                pending_slot[session_key] = overflow.pop(0)
+                stage_fifo_head(self, adapter, session_key, overflow.pop(0))
             logger.warning(
                 "Rescued orphaned FIFO overflow event for idle session "
                 "%s — it was queued during a busy window but the post-turn "

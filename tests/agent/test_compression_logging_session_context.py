@@ -57,7 +57,7 @@ def _build_agent_with_db(db: SessionDB, session_id: str):
     return agent
 
 
-def test_logging_session_context_follows_compression_rotation(tmp_path: Path) -> None:
+def test_logging_session_context_follows_compression_rotation(tmp_path: Path, isolated_entrypoint_bootstrap) -> None:
     db = SessionDB(db_path=tmp_path / "state.db")
     parent_sid = "PARENT_LOGCTX_SESSION"
     db.create_session(parent_sid, source="cli")

@@ -339,5 +339,7 @@ def decompose_task(
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Return task ids currently in the triage column."""
     with kbc.connect_closing() as conn:
+        if kb.board_tracking_only(conn):
+            return []
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
     return [row.id for row in rows]

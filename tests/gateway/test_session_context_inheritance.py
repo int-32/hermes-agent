@@ -64,10 +64,13 @@ FOREIGN = dict(
 
 
 @pytest.fixture(autouse=True)
-def _isolate_session_context():
+def _isolate_session_context(tmp_path, monkeypatch):
     """Clean ContextVar + engaged-latch slate per test, restored afterwards."""
     import os
 
+    # Identity inheritance does not depend on the operator's installed tool store or launcher.
+    monkeypatch.setenv("HERMES_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setattr("tools.environments.local._resolve_hermes_bin_dir", lambda: None)
     saved_env = {k: os.environ.get(k) for k in SESSION_VARS}
     saved_ctx = {name: var.get() for name, var in _VAR_MAP.items()}
     saved_async = _SESSION_ASYNC_DELIVERY.get()

@@ -221,6 +221,7 @@ class TestFinalAdoptionGuards:
         assert adapter.draft_calls == []
 
 
+@pytest.mark.usefixtures("isolated_entrypoint_bootstrap")
 class TestQueuedLaneReconcile:
     @pytest.mark.asyncio
     async def test_queued_first_response_edits_in_place(self):

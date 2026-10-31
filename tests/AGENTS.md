@@ -26,7 +26,12 @@ scripts/run_tests.sh                                    # full suite
 scripts/run_tests.sh tests/gateway/                     # one directory
 scripts/run_tests.sh tests/agent/test_foo.py -k test_x  # runner is file-granular; -k narrows
 scripts/run_tests.sh -v --tb=long                       # pytest flags pass through
+scripts/run_tests.sh --scratch-root .hermes/test-runs tests/gateway/  # checkout-local temporary files
 ```
+
+`--scratch-root` accepts only a directory inside the current checkout. It isolates the native
+profile root before collection and retains the real-home I/O guard; it never grants access to
+operator state outside the checkout.
 
 - **Flake policy:** a failing FILE is retried once in a fresh subprocess (`--file-retries`;
   `HERMES_TEST_FILE_RETRIES=0` disables); a worker killed by signal or the file timeout is never

@@ -87,6 +87,17 @@ def _rmtree_force(path: str) -> None:
             pass
     shutil.rmtree(path, onerror=_chmod_retry)
 
+_EXPLICIT_SCRATCH_ROOT: Optional[str] = None
+
+
+def _checkout_scratch_root(value: str, repo_root: Path) -> str:
+    root = Path(value).expanduser().resolve()
+    if root == repo_root.resolve() or not root.is_relative_to(repo_root.resolve()):
+        raise ValueError("--scratch-root must be a directory inside this checkout")
+    root.mkdir(parents=True, exist_ok=True)
+    return str(root)
+
+
 def _runner_scratch_root() -> str:
     """Per-run temp roots live on DISK, never the system temp dir: a full-suite run writes
     gigabytes of tmp_path fixtures and /tmp is RAM-backed tmpfs on many Linux hosts. /var/tmp is
@@ -100,6 +111,8 @@ def _runner_scratch_root() -> str:
     later makedirs/mkdtemp here fail with EPERM for every other user on the host, with no way
     back that does not need root. Keying by uid means no run is blocked by another's leftovers.
     """
+    if _EXPLICIT_SCRATCH_ROOT is not None:
+        return _EXPLICIT_SCRATCH_ROOT
     name = "hermes-pytest" + (f"-{os.getuid()}" if hasattr(os, "getuid") else "")
     if os.name == "nt" or not os.path.isdir("/var/tmp"):  # no-tmp: ok — probing the disk-backed FHS root
         root = os.path.join(tempfile.gettempdir(), name)
@@ -646,6 +659,9 @@ def _run_one_file_once(
     # Every tempfile.* call inside the test process lands in the same per-run root, so the
     # parent's cleanup of ``temproot`` removes them too instead of leaving them in /tmp.
     env["TMPDIR"] = temproot
+    env.pop("HERMES_TEST_RUNNER_SCRATCH", None)
+    if _EXPLICIT_SCRATCH_ROOT is not None:
+        env["HERMES_TEST_RUNNER_SCRATCH"] = temproot
 
     subproc_start = time.monotonic()
     # launch the pytest process
@@ -1150,12 +1166,100 @@ def _print_failure_report(
             print(f"  {_format_file(file, repo_root)}")
 
 
+def _parse_runner_arguments(parser):
+    global _EXPLICIT_SCRATCH_ROOT
+    # Split argv into "our flags + positional paths" vs "pytest passthrough".
+    #
+    # Two ways to pass args through to the per-file pytest invocation:
+    #   1. Explicit ``--`` separator: everything after it goes to pytest.
+    #   2. Bare pytest flags anywhere before ``--``: any token starting with
+    #      ``-`` that isn't one of OUR options is routed to pytest, so a bare
+    #      ``-q`` / ``-v`` / ``-x`` / ``--tb=long`` / ``-k expr`` "just works"
+    #      without the developer remembering the ``--``. This matches the
+    #      docstring's promise and pytest muscle-memory.
+    #
+    # The subtlety bare-flag routing must handle: value-taking pytest flags
+    # given in space-separated form (``-k expr``, ``-m mark``, ``-p plugin``,
+    # ``-o name=val``). Naively, ``expr`` would look like a positional path and
+    # clobber discovery. We peel the following token along with such flags so
+    # it never reaches our positional ``paths``. ``=``-joined forms
+    # (``-k=expr``, ``--tb=long``) are self-contained and need no lookahead.
+    OUR_FLAGS = {
+        "-h", "--help", "-j", "--jobs", "--paths", "--include-integration",
+        "--file-timeout", "--file-retries", "--slice", "--generate-slices", "--files",
+        "--files-from", "--fail-on-skip", "--scratch-root",
+    }
+    # pytest short flags that consume the NEXT token as their value.
+    PYTEST_VALUE_FLAGS = {"-k", "-m", "-p", "-o", "-c", "-r", "-W"}
+
+    def _is_our_flag(tok: str) -> bool:
+        # Match exact (``-j``, ``--paths``), ``=``-joined (``--paths=x``),
+        # and attached short-value (``-j4``) forms of our own options.
+        if tok in OUR_FLAGS:
+            return True
+        head = tok.split("=", 1)[0]
+        if head in OUR_FLAGS:
+            return True
+        # Attached short value, e.g. ``-j4`` → ``-j``.
+        if len(tok) > 2 and tok[:2] in OUR_FLAGS and not tok[1] == "-":
+            return True
+        return False
+
+    argv = sys.argv[1:]
+    # argparse treats a bare "-" as a positional, so "--files-from -"
+    # would die with "expected one argument" before our code ever runs.
+    # Normalize to the "="-joined form, which argparse accepts.
+    if "--files-from" in argv:
+        i = argv.index("--files-from")
+        if i + 1 < len(argv) and argv[i + 1] == "-":
+            argv[i : i + 2] = ["--files-from=-"]
+    if "--" in argv:
+        sep = argv.index("--")
+        before, explicit_passthrough = argv[:sep], argv[sep + 1 :]
+    else:
+        before, explicit_passthrough = argv, []
+
+    our_args: list[str] = []
+    bare_passthrough: list[str] = []
+    i = 0
+    while i < len(before):
+        tok = before[i]
+        if tok.startswith("-") and not _is_our_flag(tok):
+            bare_passthrough.append(tok)
+            # Pull the value token for space-separated value flags.
+            if tok in PYTEST_VALUE_FLAGS and i + 1 < len(before):
+                bare_passthrough.append(before[i + 1])
+                i += 2
+                continue
+        else:
+            our_args.append(tok)
+        i += 1
+
+    args = parser.parse_args(our_args)
+    if args.scratch_root:
+        try:
+            _EXPLICIT_SCRATCH_ROOT = _checkout_scratch_root(args.scratch_root, Path(__file__).resolve().parent.parent)
+        except ValueError as exc:
+            parser.error(str(exc))
+
+    # Bare tokens are validated against pytest's option set so a typo fails
+    # here with usage instead of once per discovered file. Anything after a
+    # literal ``--`` is the caller's explicit choice and is forwarded as-is.
+    if bare_passthrough:
+        flag_error = _pytest_flag_error(bare_passthrough)
+        if flag_error:
+            parser.error(flag_error)
+
+    return args, bare_passthrough, explicit_passthrough
+
+
 def main() -> int:
     _make_stdio_glyph_safe()
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--scratch-root", help="Keep runner-owned temporary files inside this checkout")
     parser.add_argument(
         "-j",
         "--jobs",
@@ -1267,82 +1371,7 @@ def main() -> int:
             "separator is passed through to each per-file pytest invocation."
         ),
     )
-    # Split argv into "our flags + positional paths" vs "pytest passthrough".
-    #
-    # Two ways to pass args through to the per-file pytest invocation:
-    #   1. Explicit ``--`` separator: everything after it goes to pytest.
-    #   2. Bare pytest flags anywhere before ``--``: any token starting with
-    #      ``-`` that isn't one of OUR options is routed to pytest, so a bare
-    #      ``-q`` / ``-v`` / ``-x`` / ``--tb=long`` / ``-k expr`` "just works"
-    #      without the developer remembering the ``--``. This matches the
-    #      docstring's promise and pytest muscle-memory.
-    #
-    # The subtlety bare-flag routing must handle: value-taking pytest flags
-    # given in space-separated form (``-k expr``, ``-m mark``, ``-p plugin``,
-    # ``-o name=val``). Naively, ``expr`` would look like a positional path and
-    # clobber discovery. We peel the following token along with such flags so
-    # it never reaches our positional ``paths``. ``=``-joined forms
-    # (``-k=expr``, ``--tb=long``) are self-contained and need no lookahead.
-    OUR_FLAGS = {
-        "-h", "--help", "-j", "--jobs", "--paths", "--include-integration",
-        "--file-timeout", "--file-retries", "--slice", "--generate-slices", "--files",
-        "--files-from", "--fail-on-skip",
-    }
-    # pytest short flags that consume the NEXT token as their value.
-    PYTEST_VALUE_FLAGS = {"-k", "-m", "-p", "-o", "-c", "-r", "-W"}
-
-    def _is_our_flag(tok: str) -> bool:
-        # Match exact (``-j``, ``--paths``), ``=``-joined (``--paths=x``),
-        # and attached short-value (``-j4``) forms of our own options.
-        if tok in OUR_FLAGS:
-            return True
-        head = tok.split("=", 1)[0]
-        if head in OUR_FLAGS:
-            return True
-        # Attached short value, e.g. ``-j4`` → ``-j``.
-        if len(tok) > 2 and tok[:2] in OUR_FLAGS and not tok[1] == "-":
-            return True
-        return False
-
-    argv = sys.argv[1:]
-    # argparse treats a bare "-" as a positional, so "--files-from -"
-    # would die with "expected one argument" before our code ever runs.
-    # Normalize to the "="-joined form, which argparse accepts.
-    if "--files-from" in argv:
-        i = argv.index("--files-from")
-        if i + 1 < len(argv) and argv[i + 1] == "-":
-            argv[i : i + 2] = ["--files-from=-"]
-    if "--" in argv:
-        sep = argv.index("--")
-        before, explicit_passthrough = argv[:sep], argv[sep + 1 :]
-    else:
-        before, explicit_passthrough = argv, []
-
-    our_args: list[str] = []
-    bare_passthrough: list[str] = []
-    i = 0
-    while i < len(before):
-        tok = before[i]
-        if tok.startswith("-") and not _is_our_flag(tok):
-            bare_passthrough.append(tok)
-            # Pull the value token for space-separated value flags.
-            if tok in PYTEST_VALUE_FLAGS and i + 1 < len(before):
-                bare_passthrough.append(before[i + 1])
-                i += 2
-                continue
-        else:
-            our_args.append(tok)
-        i += 1
-
-    args = parser.parse_args(our_args)
-
-    # Bare tokens are validated against pytest's option set so a typo fails
-    # here with usage instead of once per discovered file. Anything after a
-    # literal ``--`` is the caller's explicit choice and is forwarded as-is.
-    if bare_passthrough:
-        flag_error = _pytest_flag_error(bare_passthrough)
-        if flag_error:
-            parser.error(flag_error)
+    args, bare_passthrough, explicit_passthrough = _parse_runner_arguments(parser)
 
     # ── Node-id selectors → file + ``-k`` filter ────────────────────────────
     # This runner is FILE-granular: it spawns one ``pytest <file>`` per test

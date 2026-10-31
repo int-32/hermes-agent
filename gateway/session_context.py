@@ -56,6 +56,11 @@ _SESSION_ASYNC_DELIVERY = ContextVar("HERMES_SESSION_ASYNC_DELIVERY", default=_U
 # or child-process export: a bound id alone cannot authorize detached delivery.
 _SESSION_HISTORY_DELIVERY = ContextVar("HERMES_SESSION_HISTORY_DELIVERY", default=_UNSET)
 
+# Gateway-owned current source, including transport provenance. Never exported to env or
+# reconstructed from session ids: shared threads can have different current requesters.
+_SESSION_NATIVE_SOURCE = ContextVar("native_gateway_source", default=None)
+_SESSION_NATIVE_HOME = ContextVar("native_gateway_home", default=None)
+
 # Cron auto-delivery vars, set per-job in run_job() so concurrent jobs don't clobber.
 _CRON_AUTO_DELIVER_PLATFORM = ContextVar("HERMES_CRON_AUTO_DELIVER_PLATFORM", default=_UNSET)
 _CRON_AUTO_DELIVER_CHAT_ID = ContextVar("HERMES_CRON_AUTO_DELIVER_CHAT_ID", default=_UNSET)
@@ -130,6 +135,48 @@ def source_route_metadata(source: Any, metadata: dict | None) -> dict | None:
     return {**(metadata or {}), **anchors} if anchors else metadata
 
 
+def source_session_vars(source: Any) -> dict:
+    """Scalar routing metadata shared by outer handlers and actual native model turns."""
+    return {
+        "platform": source.platform.value,
+        **{name: str(getattr(source, name, None) or "") for name in (
+            "chat_id", "chat_type", "chat_name", "thread_id", "user_id", "user_id_alt",
+            "user_name", "scope_id", "parent_chat_id", "message_id", "profile",
+        )},
+    }
+
+
+@contextmanager
+def native_model_turn_scope(runner: Any, source: Any, session_key: str, session_id: str,
+                            generation: int | None = None) -> Iterator[None]:
+    """Bind the actual native turn before worker context copies; restore its caller on unwind.
+
+    Recursive queued turns share an outer handler, but never its requester proof or profile.
+    Compression may still rotate the worker's session id.
+    """
+    from agent.runtime_cwd import reset_session_cwd, scoped_session_cwd, set_session_cwd
+    from gateway.session_identity import replace_source
+    from hermes_constants import get_hermes_home
+    snapshot = replace_source(source)
+    with runner._profile_scope_for_source(snapshot):
+        home = get_hermes_home()
+        adapter = runner._delivery_adapter_for(snapshot)
+        cwd = scoped_session_cwd()
+        cwd_token = set_session_cwd(cwd)
+        tokens = set_session_vars(**source_session_vars(snapshot), session_key=session_key,
+            session_id=session_id, cron_session="", cwd=cwd,
+            async_delivery=getattr(adapter, "supports_async_delivery", True))
+        from gateway.native_endpoint import NATIVE_TURN, NativeTurn
+        tokens.extend((_SESSION_NATIVE_SOURCE.set(snapshot), _SESSION_NATIVE_HOME.set(home),
+                       NATIVE_TURN.set(NativeTurn(runner, session_key, session_id, home, generation))))
+        try:
+            yield
+        finally:
+            for token in reversed(tokens):
+                token.var.reset(token)
+            reset_session_cwd(cwd_token)
+
+
 def set_session_vars(
     platform: str = "", source: str = "", chat_id: str = "", chat_type: str = "",
     chat_name: str = "", thread_id: str = "", user_id: str = "", user_id_alt: str = "",
@@ -158,6 +205,8 @@ def set_session_vars(
     tokens = [var.set(value) for var, value in zip(_SESSION_VARS, values)]
     tokens.append(_SESSION_ASYNC_DELIVERY.set(bool(async_delivery)))
     tokens.append(_SESSION_HISTORY_DELIVERY.set(_UNSET if session_history_delivery is None else session_history_delivery))
+    tokens.append(_SESSION_NATIVE_SOURCE.set(None))
+    tokens.append(_SESSION_NATIVE_HOME.set(None))
     _runtime_cwd("set_session_cwd", cwd)
     return tokens
 
@@ -172,6 +221,8 @@ def clear_session_vars(tokens: list) -> None:
         var.set("")
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
     _SESSION_HISTORY_DELIVERY.set(_UNSET)
+    _SESSION_NATIVE_SOURCE.set(None)
+    _SESSION_NATIVE_HOME.set(None)
     _runtime_cwd("clear_session_cwd")
 
 
@@ -185,6 +236,8 @@ def reset_session_vars() -> None:
         var.set(_UNSET)
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
     _SESSION_HISTORY_DELIVERY.set(_UNSET)
+    _SESSION_NATIVE_SOURCE.set(None)
+    _SESSION_NATIVE_HOME.set(None)
     _runtime_cwd("clear_session_cwd")
 
 
