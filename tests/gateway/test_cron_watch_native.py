@@ -61,7 +61,7 @@ def cold(name, args):
     return ToolCall('tool_call', {'name': name, 'arguments': args})
 
 
-def responder(home, held=None, release=None, owner_loss=False):
+def responder(home, held=None, release=None, owner_loss=False, first_action='hot'):
     counts = {}
     doc = str(home / 'documents/project/watch-task/HANDOFF.md')
     def answer(body):
@@ -83,29 +83,45 @@ def responder(home, held=None, release=None, owner_loss=False):
         if 'read the fixture note' in text:
             return ToolCall('read_file', {'path': str(home / 'note.txt')}) if phase == 0 else Text('producer queued')
         if 'Scheduled task check;' in text:
+            if first_action == 'none':
+                actions = [ToolCall('tool_call', '[]'), ToolCall('tool_search', {'query': 'read a file'}), Text('no action')]
+                return actions[min(phase, len(actions) - 1)]
             if owner_loss and phase == 0:
                 held.set()
                 if not release.wait(40):
                     raise RuntimeError('owner-loss model barrier was not released')
-            return [ToolCall('read_file', {'path': doc}), cold('coordinate_session', {
+            actions = [ToolCall('read_file', {'path': doc}), cold('coordinate_session', {
                 'request_id': 'fixture-watch-root', 'task_id': 'watch-task', 'handoff_path': doc,
                 'target': 'task:watch-task'}), cold('coordinate_session', {
                 'request_id': 'duplicate-watch-root', 'task_id': 'watch-task', 'handoff_path': doc,
-                'target': 'task:watch-task'}), Text('queued')][min(phase, 3)]
+                'target': 'task:watch-task'}), Text('queued')]
+            return action_at(actions, phase, first_action)
         if 'Native document handoff;' in text:
-            return [ToolCall('read_file', {'path': doc}), cold('coordinate_session', {
+            actions = [ToolCall('read_file', {'path': doc}), cold('coordinate_session', {
                 'request_id': 'ancestor-loop', 'task_id': 'watch-task', 'handoff_path': doc, 'target': 'main'}),
                 cold('coordinate_session', {'action': 'complete', 'request_id': 'fixture-watch-root', 'outcome': 'completed'}),
                 cold('coordinate_session', {'request_id': 'after-completion', 'task_id': 'watch-task',
-                    'handoff_path': doc, 'target': 'main'}), Text('private verified')][min(phase, 4)]
+                    'handoff_path': doc, 'target': 'main'}), Text('private verified')]
+            if first_action != 'hot':
+                actions[1], actions[2] = actions[2], actions[1]
+            return action_at(actions, phase, first_action)
         if 'Native document dependency receipt;' in text:
-            return [ToolCall('read_file', {'path': doc}), cold('coordinate_session', {
+            actions = [ToolCall('read_file', {'path': doc}), cold('coordinate_session', {
                 'action': 'complete', 'request_id': 'fixture-watch-root', 'outcome': 'completed'}),
                 cold('coordinate_session', {'request_id':'after-completion', 'task_id':'watch-task',
                     'handoff_path': doc, 'target':'main' if 'handoff;' in text else 'task:watch-task'}),
-                Text('private verified')][min(phase, 3)]
+                Text('private verified')]
+            return action_at(actions, phase, first_action)
         return Text('fixture idle')
     return answer
+
+
+def action_at(actions, phase, first_action):
+    if first_action != 'hot':
+        actions[0], actions[1] = actions[1], actions[0]
+    if first_action == 'invalid-bridge':
+        actions.insert(0, ToolCall('tool_call', '[]'))
+    return actions[min(phase, len(actions) - 1)]
 
 
 def rows(home, table):
@@ -122,7 +138,7 @@ def private_work(home):
         return [json.loads(row[0]) for row in db.execute('SELECT record FROM requests')]
 
 
-@pytest.mark.parametrize('scenario', ['complete-main-reset', 'complete-task-reset', 'complete-busy', 'owner-loss', 'consent-false', 'unbound-job', 'route-mismatch',
+@pytest.mark.parametrize('scenario', ['no-business', 'complete-cold-first', 'complete-invalid-bridge', 'complete-main-reset', 'complete-task-reset', 'complete-busy', 'owner-loss', 'consent-false', 'unbound-job', 'route-mismatch',
                                      'no-change', 'collection-error'])
 def test_canonical_watch_reaches_native_task_and_correlated_private_return(tmp_path, scenario):
     from hermes_time import now
@@ -138,7 +154,8 @@ def test_canonical_watch_reaches_native_task_and_correlated_private_return(tmp_p
     runtime = Path('/tmp') / ('hwe-' + hashlib.sha256(str(root).encode()).hexdigest()[:12])  # no-tmp: ok — official AF_UNIX socket length limit
     runtime.mkdir(mode=0o700, exist_ok=True)
     held, release = threading.Event(), threading.Event()
-    with FakeLLMServer(responder(home, held, release, scenario == 'owner-loss')) as model:
+    first_action = {'no-business': 'none', 'complete-cold-first': 'cold', 'complete-invalid-bridge': 'invalid-bridge'}.get(scenario, 'hot')
+    with FakeLLMServer(responder(home, held, release, scenario == 'owner-loss', first_action)) as model:
         config = '''
 compression:
   in_place: false
@@ -235,6 +252,17 @@ plugins:
             assert (home / 'producer.json').exists(), dict(admissions=rows(home, 'session_admissions'),
                 model=model.main_requests(), tick=tick.stdout + tick.stderr)
             seen = json.loads((home / 'producer.json').read_text())
+            if scenario == 'no-business':
+                await async_wait_until(lambda: any(r['status'] == 'terminal' for r in watch_rows(home)), timeout=30)
+                (home / 'query-status').touch()
+                await async_wait_until(lambda: json_ready(home / 'observed.json'), timeout=25)
+                observed = json.loads((home / 'observed.json').read_text())
+                assert observed['model_completed'] is True and observed['completed'] is False, observed
+                assert observed['first_tool'] is None and not private_work(home), observed
+                assert len(watch_rows(home)) == 1
+                save_evidence(root, tmp_path, scenario=scenario, producer=seen, result=observed,
+                              requests=model.main_requests())
+                return
             if scenario == 'owner-loss':
                 await async_wait_until(held.is_set, timeout=25)
                 assert len(watch_rows(home)) == 1 and watch_rows(home)[0]['status'] == 'started'
@@ -275,9 +303,10 @@ plugins:
             await async_wait_until(lambda: (home / 'observed.json').exists(), timeout=25)
             observed = json.loads((home / 'observed.json').read_text())
             assert observed['completed'] is True and observed['model_completed'] is True, observed
-            assert observed['first_tool'] == 'read_file', observed
-            assert observed['private_requests'][0].get('request_first_tool', {}).get('name') == 'read_file', observed
-            assert observed['private_requests'][0].get('origin_first_tool', {}).get('name') == 'read_file', observed
+            expected_first = 'read_file' if first_action == 'hot' else 'coordinate_session'
+            assert observed['first_tool'] == expected_first, observed
+            assert observed['private_requests'][0].get('request_first_tool', {}).get('name') == expected_first, observed
+            assert observed['private_requests'][0].get('origin_first_tool', {}).get('name') == expected_first, observed
             assert observed['admission_id'] == record['producer_admission_id'], observed
             tool_results = [m['content'] for b in model.main_requests() for m in b['messages'] if m['role'] == 'tool']
             assert any('recursive coordination loop refused' in text for text in tool_results), tool_results
@@ -353,7 +382,7 @@ def save_evidence(root, tmp_path, **data):
 async def verify_continuity(home, admission_id, target):
     (home / 'observed.json').unlink()
     (home / 'compress-main').touch()
-    await async_wait_until(lambda: (home / 'compressed.json').exists() or (home / 'fixture-error').exists(), timeout=40)
+    await async_wait_until(lambda: json_ready(home / 'compressed.json') or (home / 'fixture-error').exists(), timeout=40)
     assert not (home / 'fixture-error').exists(), (home / 'fixture-error').read_text()
     compressed = json.loads((home / 'compressed.json').read_text())
     assert compressed['before'] != compressed['after']
@@ -370,3 +399,10 @@ async def verify_continuity(home, admission_id, target):
     result = json.loads((home / 'observed.json').read_text())
     assert result['completed'] is False and 'reset or forked' in result.get('error', ''), result
     assert len(watch_rows(home)) == 1 and len(private_work(home)) == 1
+
+
+def json_ready(path):
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None

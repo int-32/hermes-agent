@@ -1897,6 +1897,10 @@ def register(ctx):
 For a cron-driven check of an existing native task, an operator can bind the
 plugin's `settings.watch_jobs` map from a persisted job ID to its Kanban task ID.
 This selects the plugin capability; Kanban remains the task/source authority.
+Each job selects one task. One fire cannot check several tasks by changing the
+content: its durable identity remains the same and a different payload conflicts.
+This is a single-task entry, not a global periodic task sweep; a producer that
+iterates over many tasks requires separate integration work.
 `ctx.request_cron_task(content)` accepts no SID, route, home or user arguments.
 It requires the real canonical cron execution, resolves the unique trusted Kanban
 source and its own main through the existing native endpoint guards, and reuses
@@ -1907,6 +1911,10 @@ private return behavior and the tracking-only board remain unchanged.
 Replies include `job_id`, `execution_id` and `task_id`, even when the host response
 times out. Retain these IDs and the exact content for observation after a restart;
 an unknown execution is never automatically resubmitted.
+Observation still requires the original persisted job, its current binding and
+native endpoint, and the exact original content. Removing the job or changing its
+binding can make an old receipt unobservable; missing evidence remains incomplete
+and does not authorize a replay or relax consent, profile, reset or fork guards.
 
 The task check's `model_completed`, `first_tool`, `private_requests` and `completed`
 are separate observations. Only private native work dispatched by that actual
@@ -1914,7 +1922,14 @@ admission and confirmed through the existing task and origin completion gates
 can complete the check. Queued, missing, unknown or uncorrelated output stays
 incomplete. Text in the request is untrusted data, never identity or permission.
 The initial main action and both private phases require their own current-turn
-tool/result correlation. Each check admission can create one private root request;
+business execution/result correlation. The executor records the actual invoked
+tool name and call ID in internal durable metadata after its policy gates; a cold
+`tool_call` retains its original transcript name. Discovery, bridge parsing
+errors and calls skipped before execution cannot supply this evidence. An actual
+business-tool attempt that returns an error can supply it, without proving
+business success. Legacy results lacking execution evidence stay incomplete.
+The internal metadata is removed from provider messages.
+Each check admission can create one private root request;
 retrying that exact request retains its existing receipt.
 Keep the cron script's existing `wakeAgent: false` pre-agent gate for no-change
 runs; collection failures must remain visible failures. This API does not activate

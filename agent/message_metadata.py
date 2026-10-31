@@ -52,6 +52,20 @@ PERSISTENCE_ONLY_MESSAGE_FIELDS = frozenset(
 
 # Connector data-use requirement on a tool message; persisted inside ``display_metadata``, never sent to a model.
 DATA_USE = "data_use"
+TOOL_EXECUTION = "tool_execution"
+
+
+def stamp_tool_execution(message: MutableMapping[str, Any], executed: bool) -> None:
+    """Executor-owned result evidence; durable via the existing metadata column, never on the wire."""
+    metadata = message.get("display_metadata")
+    metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    metadata.pop(TOOL_EXECUTION, None)
+    if executed:
+        metadata[TOOL_EXECUTION] = {"name": message["tool_name"], "call_id": message["tool_call_id"]}
+    if metadata:
+        message["display_metadata"] = metadata
+    else:
+        message.pop("display_metadata", None)
 
 
 def data_use_requirement(messages: Any) -> frozenset[str]:

@@ -43,7 +43,7 @@ from agent.inline_tool_executors import (
     emit_terminal_post_tool_call,
     tool_hook_ids,
 )
-from agent.message_metadata import stamp_data_use
+from agent.message_metadata import stamp_data_use, stamp_tool_execution
 from agent.tool_dispatch_helpers import (
     _NEVER_PARALLEL_TOOLS,
     _is_destructive_command,
@@ -474,6 +474,7 @@ class _ManagedToolResult:
     blocked: bool
     dispatched: bool
     data_use: frozenset[str] = frozenset()
+    executed: bool = False
 
 
 class _ToolTimeoutResult(str):
@@ -754,8 +755,11 @@ def _dispatch_authorized_once(
     from agent.tool_progress_relay import bound_tool_progress
     from tools.connectors.data_use import collect_data_use
     with bound_tool_progress(agent.tool_progress_callback, ref.name, ref.call_id), collect_data_use() as data_use:
+        def invoke():
+            state.executed = True
+            return execute(ref.args)
         try:
-            return _run_with_activity_heartbeat(agent, ref.name, lambda: execute(ref.args))
+            return _run_with_activity_heartbeat(agent, ref.name, invoke)
         finally:
             state.data_use = frozenset(data_use)
 
@@ -1081,6 +1085,7 @@ def _commit_tool_result(
     blocked: bool,
     effect_disposition,
     observed: bool = False,
+    executed: bool = False,
     data_use: frozenset[str] = frozenset(),
     error_preview: Callable[[Any], Any] = lambda result: result,
     success_log_chars: Optional[int] = None,
@@ -1153,12 +1158,8 @@ def _commit_tool_result(
     # string-safe fallback so a rejected image result never poisons history.
     _tool_content = agent._tool_result_content_for_active_model(function_name, persisted_result)
     tool_message = make_tool_result_message(function_name, _tool_content, tool_call_id, effect_disposition=effect_disposition)
-    # A plugin that went live during this turn, and late LSP verdicts on this session's earlier edits,
-    # are told on this new row (outside any untrusted-data wrapper).
     lsp_deferred.forward_to_agent(agent)
     plugin_live_notes.attach_to_tool_message(agent, tool_message)
-    # Prepare presentation data before the append. The emitting completion callback
-    # stays below the durability fence; raw tool/model content remains unchanged.
     prepare_metadata = getattr(agent, "tool_result_metadata_callback", None)
     if not blocked and prepare_metadata:
         try:
@@ -1168,6 +1169,7 @@ def _commit_tool_result(
                 tool_message["display_metadata"] = metadata
         except Exception as callback_error:
             logging.debug("Tool result metadata callback error: %s", callback_error)
+    stamp_tool_execution(tool_message, executed and not blocked)
     stamp_data_use(tool_message, sorted(data_use))
     messages.append(tool_message)
     if not _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}"):
@@ -1259,6 +1261,7 @@ class _ToolOutcome:
     is_error: bool
     blocked: bool
     data_use: frozenset[str] = frozenset()
+    executed: bool = False
 
 
 def _start_order_gate_timeout(batch_timeout: float | None) -> float:
@@ -1350,7 +1353,7 @@ class _ConcurrentBatch:
         # Approval/sudo callbacks (thread-local) and the agent turn's ContextVars are propagated by
         # propagate_context_to_thread() at the submit site below (GHSA-qg5c-hvr5-hjgr, #13617).
         start = time.time()
-        blocked = dispatched = False
+        blocked = dispatched = executed = False
         data_use: frozenset[str] = frozenset()
         try:
             managed = _run_agent_tool_execution_middleware(
@@ -1371,6 +1374,7 @@ class _ConcurrentBatch:
             )
             result, ref.args, ref.trace = managed.result, managed.args, managed.middleware_trace
             blocked, dispatched, data_use = managed.blocked, managed.dispatched, managed.data_use
+            executed = managed.executed
         except _BatchAbandoned:
             logger.info("tool %s abandoned at start-order gate; skipping dispatch", ref.name)
             return None
@@ -1395,7 +1399,7 @@ class _ConcurrentBatch:
             logger.info(
                 "tool %s completed (%.2fs, %d chars)", ref.name, duration, result_chars
             )
-        return _ToolOutcome(ref, result, duration, is_error, blocked, data_use)
+        return _ToolOutcome(ref, result, duration, is_error, blocked, data_use, executed)
 
     def run_worker(self, index: int, start_order: int) -> None:
         """Worker function executed in a thread."""
@@ -1566,6 +1570,7 @@ def _append_batch_results(agent, messages: list, effective_task_id: str, batch: 
             agent, messages, ref, function_result,
             budget=budget, tool_duration=tool_duration, is_error=is_error, blocked=blocked,
             effect_disposition=effect_disposition, observed=r is not None, data_use=r.data_use if r else frozenset(),
+            executed=r.executed if r else False,
             error_preview=lambda res: _multimodal_text_summary(res)[:200],
         )
         if committed is None:
@@ -1841,6 +1846,7 @@ def _publish_sequential_result(agent, messages: list, ref: _ToolCallRef, managed
         agent, messages, ref, function_result,
         budget=budget, tool_duration=tool_duration, is_error=_is_error_result, blocked=managed.blocked,
         effect_disposition="unknown" if _execution_timed_out else None, observed=True, data_use=managed.data_use,
+        executed=managed.executed and not _execution_timed_out,
         error_preview=lambda res: res[:200] if isinstance(res, str) and not agent.verbose_logging else res,
         success_log_chars=_result_len,
         verbose_text=_multimodal_text_summary,

@@ -24,22 +24,38 @@ def receipt_for(event):
 
 
 def first_tool_result(result):
-    """Only this producer-stamped turn's tool/result pair, never an old history call."""
+    """This turn's actual business execution/result, not a declaration or discovery bridge."""
     messages = result.get('messages') or []
     if result.get('_messages_are_turn_suffix') is not True:
         anchor = result.get('current_turn_user_idx')
         if not (type(anchor) is int and 0 <= anchor < len(messages) and messages[anchor].get('role') == 'user'):
             return None
         messages = messages[anchor + 1:]
+    pending = set()
     for message in messages:
-        if message.get('role') != 'assistant':
-            continue
-        for call in message.get('tool_calls') or []:
-            name, call_id = (call.get('function') or {}).get('name'), call.get('id')
-            if isinstance(name, str) and name and call_id:
-                return {'name': name, 'call_id': call_id, 'result_seen': any(
-                    m.get('role') == 'tool' and m.get('tool_call_id') == call_id for m in messages)}
+        if message.get('role') == 'assistant':
+            pending.update(call.get('id') for call in message.get('tool_calls') or [] if call.get('id'))
+        elif message.get('role') == 'tool' and message.get('tool_call_id') in pending:
+            pending.remove(message['tool_call_id'])
+            proof = _business_tool_result(message)
+            if proof is not None:
+                return proof
     return None
+
+
+def _business_tool_result(message):
+    from agent.message_metadata import TOOL_EXECUTION
+    from tools.tool_search_catalog import BRIDGE_TOOL_NAMES
+    metadata = message.get('display_metadata')
+    proof = metadata.get(TOOL_EXECUTION) if isinstance(metadata, dict) else None
+    if not isinstance(proof, dict):
+        return None
+    name, call_id = proof.get('name'), message.get('tool_call_id')
+    if (not isinstance(name, str) or not name or name in BRIDGE_TOOL_NAMES
+            or proof.get('call_id') != call_id or message.get('tool_name') != name
+            or message.get('effect_disposition') in {'none', 'unknown'}):
+        return None
+    return {'name': name, 'call_id': call_id, 'result_seen': True}
 
 
 def capture_internal_response(event, response: str, *, successful: bool, agent_result=None) -> None:
