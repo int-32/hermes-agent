@@ -31,6 +31,7 @@ from registration_lifecycle import replacement_coordinator
 from utils import env_var_enabled
 from hermes_cli.config import load_config_readonly
 from hermes_cli.middleware import VALID_MIDDLEWARE
+from hermes_cli.plugins_injection import PluginInjectionContext
 from hermes_cli.plugin_capabilities import plugin_capability_granted
 from hermes_cli.relay_plugin_cutover import RELAY_PLUGINS_CONFIG_ENV, legacy_relay_plugin_keys
 # Sibling modules' names are re-exported here (origin) so plugins and tests keep one import path.
@@ -225,7 +226,7 @@ class LoadedPlugin:
     deferred: bool = False
 
 
-class PluginContext:
+class PluginContext(PluginInjectionContext):
     """Facade given to plugins so they can register tools and hooks."""
 
     def __init__(self, manifest: PluginManifest, manager: PluginManager):
@@ -585,15 +586,6 @@ class PluginContext:
     # Fail-closed by construction: any failure to read consent state inside plugin_capability_granted
     # returns False. The profile-scoped config is passed through so a multi-profile process consults THIS
     # manager's home, never the active profile's (#65593 constraint).
-    def inject_message(
-        self, content: str, role: str = "user", *, session_key: str | None = None,
-        origin: Mapping[str, Any] | None = None,
-    ) -> bool:
-        """Queue *content* for a session (``session_key``) or a chat in this plugin's own profile
-        (``origin``); ``True`` means a host accepted it. Contract: plugins_injection.py, plugin docs."""
-        from hermes_cli.plugins_injection import inject_plugin_message
-        return inject_plugin_message(self, content, role, session_key=session_key, origin=origin)
-
     def session_cwd(self) -> str:
         """The calling session's recorded cwd, never the gateway's own (``plugin_session``)."""
         from hermes_cli.plugin_session import context_cwd

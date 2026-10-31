@@ -539,7 +539,7 @@ class GatewayTurnPersistenceMixin:
 
         from gateway.internal_receipt import capture_internal_response
         capture_internal_response(event, response, successful=not agent_result.get("failed", False)
-                                  and agent_result.get("api_calls", 0) > 0)
+                                  and agent_result.get("api_calls", 0) > 0, agent_result=agent_result)
         adapter = self._delivery_adapter_for(source)
         # Auto voice reply (TTS audio before the text) unless streaming TTS already delivered audio.
         _streaming_tts_done = adapter is not None and bool(

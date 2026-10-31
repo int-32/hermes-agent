@@ -1,0 +1,3 @@
+name: cron-task-check
+version: 0.1.0
+description: Continue a configured Kanban task through its own native main from a real cron execution.

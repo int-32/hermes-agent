@@ -183,6 +183,8 @@ async def submit_document(service, source_key, source_sid, caller_home, request_
     from gateway.coordination_receipts import dispatch_context
     async with service.coordination_lock:
         association = dispatch_context(source_key, request_id)
+        from gateway.plugin_cron_watch import dispatch_association
+        association.update(dispatch_association(service, source_key, task_id, destination))
         record = await asyncio.to_thread(service.journal.enqueue, {
             "protocol": 2, "root_request_id": request_id, **association,
             "kind": "coordination", "request_id": request_id, "message": message, "document": document,

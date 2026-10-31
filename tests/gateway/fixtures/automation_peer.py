@@ -1,5 +1,6 @@
 """Ordinary daemon, real terminal child, loopback-only relay/provider peers."""
 import asyncio
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -74,6 +75,8 @@ async def _identify_until_ready(home, seconds):
 async def probe(root, base, mode):
     home, user = base / 'state', base / 'user'
     home.mkdir(); user.mkdir()
+    runtime = Path('/tmp') / ('hwe-' + hashlib.sha256(str(root).encode()).hexdigest()[:12])  # no-tmp: ok — official AF_UNIX socket length limit
+    runtime.mkdir(mode=0o700, exist_ok=True)
     model = ThreadingHTTPServer(('127.0.0.1', 0), Model)
     model.requests = []
     model.blocked, model.release = threading.Event(), threading.Event()
@@ -116,8 +119,10 @@ async def probe(root, base, mode):
                 'approvals': {'mode': 'off'},
                 'auxiliary': {'title_generation': {'enabled': False}}}
             (home / 'config.yaml').write_text(json.dumps(cfg))
-            env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ', 'TIRITH_ENABLED') if k in os.environ}
+            env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ', 'TIRITH_ENABLED', 'XDG_RUNTIME_DIR') if k in os.environ}
             env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
+                XDG_RUNTIME_DIR=str(runtime),
+                NO_PROXY='*', HTTP_PROXY='', HTTPS_PROXY='', ALL_PROXY='',
                 OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=url, PYTHONUNBUFFERED='1',
                 GATEWAY_RELAY_URL=f'ws://127.0.0.1:{relay.sockets[0].getsockname()[1]}/relay',
                 GATEWAY_RELAY_PLATFORMS='telegram', GATEWAY_RELAY_BOT_IDS='{"telegram":"fixture-bot"}',
@@ -141,7 +146,7 @@ async def probe(root, base, mode):
                         await send('timer-config', '/heartbeat every 1m TIMER_AUTOMATION')
                         await wait_for(lambda: 'Heartbeat' in json.dumps(outgoing))
                     sid = rows()[0]['target_session_id']
-                    async with websocket(home, desc) as observer:
+                    async with websocket(home, desc, proxy=None) as observer:
                         assert 'result' in await rpc(observer, 'session.resume', session_id=sid)
                     await send('held', 'HOLD_AUTOMATION')
                     assert await asyncio.to_thread(model.blocked.wait, 15)

@@ -4,6 +4,7 @@ Public callers name a persisted job, never supply agent policy or arbitrary jobs
 The ordinary admission ledger owns execution; the scheduler owns final delivery.
 """
 import asyncio
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, replace
 import json
@@ -40,6 +41,17 @@ def owner_for_home(home):
 
 def current_execution():
     return _execution.get()
+
+
+@contextmanager
+def outside_execution():
+    from cron.execution_identity import outside_cron_execution
+    token = _execution.set(None)
+    try:
+        with outside_cron_execution():
+            yield
+    finally:
+        _execution.reset(token)
 
 
 def bind_execution(authority, session_id, job_id, execution_id):

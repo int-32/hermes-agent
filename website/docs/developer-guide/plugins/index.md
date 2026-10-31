@@ -1892,6 +1892,34 @@ def register(ctx):
     ctx.register_hook("pre_tool_call", guard)
 ```
 
+### Durable cron task checks
+
+For a cron-driven check of an existing native task, an operator can bind the
+plugin's `settings.watch_jobs` map from a persisted job ID to its Kanban task ID.
+This selects the plugin capability; Kanban remains the task/source authority.
+`ctx.request_cron_task(content)` accepts no SID, route, home or user arguments.
+It requires the real canonical cron execution, resolves the unique trusted Kanban
+source and its own main through the existing native endpoint guards, and reuses
+one durable identity per plugin/job/execution/task. An explicit
+`execution_id=previous_id` is observe-only: it never creates an input. Content must
+match the original request. Closed tasks cannot receive new checks; existing
+private return behavior and the tracking-only board remain unchanged.
+Replies include `job_id`, `execution_id` and `task_id`, even when the host response
+times out. Retain these IDs and the exact content for observation after a restart;
+an unknown execution is never automatically resubmitted.
+
+The task check's `model_completed`, `first_tool`, `private_requests` and `completed`
+are separate observations. Only private native work dispatched by that actual
+admission and confirmed through the existing task and origin completion gates
+can complete the check. Queued, missing, unknown or uncorrelated output stays
+incomplete. Text in the request is untrusted data, never identity or permission.
+The initial main action and both private phases require their own current-turn
+tool/result correlation. Each check admission can create one private root request;
+retrying that exact request retains its existing receipt.
+Keep the cron script's existing `wakeAgent: false` pre-agent gate for no-change
+runs; collection failures must remain visible failures. This API does not activate
+a job/plugin, claim a Kanban card, dispatch from cron as a native main, or invoke HWB.
+
 ### Add Automation Blueprints
 
 `ctx.register_automation_blueprint(key, *, title, description, schedule_template, prompt_template, category="general", slots=(), deliver_default="origin", skills=(), tags=())` adds a fill-in-the-blanks automation to the [Automation Blueprints catalog](../../reference/automation-blueprints-catalog.mdx). It appears next to the built-ins in `/blueprint` (CLI, TUI, messengers), the dashboard's Blueprints tab, and the Desktop Cron page, labelled with your plugin's name. The arguments are the fields of the built-in `AutomationBlueprint` (`cron/blueprint_catalog.py`); each slot is a dict of `BlueprintSlot` fields.

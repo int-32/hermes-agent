@@ -280,7 +280,9 @@ async def execute_admission(authority, ref, row):
     event._turn_marker_handoff = True
     handed = False
     try:
-        with await _execution_scope(authority, home):
+        from gateway.plugin_cron_watch import executing_watch
+        from gateway.session_cron import outside_execution
+        with await _execution_scope(authority, home), executing_watch(authority, row), outside_execution():
             if is_api:
                 # Committed media resolves under the owning profile's home, like admission did.
                 prepared = prepare_api_execution(authority, ref, row['payload'])

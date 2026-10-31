@@ -10,6 +10,7 @@ scheduled occurrence.
 from __future__ import annotations
 
 from contextvars import ContextVar, Token
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
@@ -52,3 +53,13 @@ def current_cron_execution() -> Optional[CronExecution]:
     from agent.delegation_context import is_delegated_child_context
 
     return None if is_delegated_child_context() else _CURRENT.get()
+
+
+@contextmanager
+def outside_cron_execution():
+    """A native receiver is a new execution, not its automation producer's cron fire."""
+    token = _CURRENT.set(None)
+    try:
+        yield
+    finally:
+        _CURRENT.reset(token)

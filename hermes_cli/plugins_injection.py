@@ -2,6 +2,8 @@
 gateway (existing ``session_key`` or a new session at ``origin``)."""
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import logging
 from collections.abc import Mapping
 from typing import Any, Optional
@@ -68,3 +70,47 @@ def inject_plugin_message(
     except Exception:
         logger.warning("inject_message: gateway scheduling failed for plugin %s", ctx.plugin_id, exc_info=True)
         return False
+
+
+def host_call(ctx, operation, *args):
+    if not ctx._gateway_injection_allowed():
+        raise PermissionError('gateway injection consent required')
+    registered = ctx._manager._gateway_message_injector
+    if registered is None:
+        raise RuntimeError('no live gateway host')
+    runner = registered[0]
+    loop = getattr(runner, '_gateway_loop', None)
+    if not runner._plugin_injection_accepting() or loop is None or loop.is_closed():
+        raise RuntimeError('gateway host not accepting')
+    try:
+        current = asyncio.get_running_loop()
+    except RuntimeError:
+        current = None
+    if current is loop:
+        raise RuntimeError('receipt injection must run off the gateway loop')
+    future = asyncio.run_coroutine_threadsafe(operation(runner, ctx, registered, *args), loop)
+    try:
+        return future.result(timeout=10)
+    except concurrent.futures.TimeoutError:
+        # The write may already be committed. Never cancel it or turn uncertainty into a resend.
+        return {'status': 'unknown', 'completed': False}
+
+
+def request_cron_task(ctx, content, execution_id):
+    from gateway.plugin_cron_watch import request, producer
+    bound = producer(ctx, execution_id)
+    return {key: bound[key] for key in ('job_id', 'execution_id', 'task_id')} | host_call(ctx, request, content, bound)
+
+
+class PluginInjectionContext:
+    def inject_message(
+        self, content: str, role: str = "user", *, session_key: str | None = None,
+        origin: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Queue *content* for a session (``session_key``) or a chat in this plugin's own profile
+        (``origin``); ``True`` means a host accepted it. Contract: plugins_injection.py, plugin docs."""
+        return inject_plugin_message(self, content, role, session_key=session_key, origin=origin)
+
+    def request_cron_task(self, content: str, *, execution_id: Optional[str] = None) -> dict:
+        """Check the configured task for this real cron fire; an explicit old id is observe-only."""
+        return request_cron_task(self, content, execution_id)

@@ -96,10 +96,14 @@ class HandoffJournal:
                     "request_id", "message", "source_key", "caller_home", "target_key",
                     "kind", "source_endpoint", "target_endpoint", "source_profile", "target_profile", "lineage"))
                 same_task = same_task and all(existing.get(k) == record.get(k) for k in (
-                    "protocol", "parent_request_id", "root_request_id"))
+                    "protocol", "parent_request_id", "root_request_id", "producer_admission_id"))
                 if not same_task or _route_anchor(existing.get("origin")) != _route_anchor(record.get("origin")):
                     raise ValueError("request_id reused with a different origin or message")
                 return existing
+            producer = record.get('producer_admission_id')
+            if producer and db.execute("SELECT 1 FROM requests WHERE json_extract(record, '$.producer_admission_id')=?",
+                                       (producer,)).fetchone():
+                raise PermissionError('watch admission already has its private work request')
             parent_id = record.get("parent_request_id")
             if parent_id:
                 parent_row = db.execute("SELECT record FROM requests WHERE id=?", (parent_id,)).fetchone()
@@ -144,6 +148,11 @@ class HandoffJournal:
         with self.connect() as db:
             records = [json.loads(row[0]) for row in db.execute("SELECT record FROM requests ORDER BY rowid")]
         return [r for r in records if r.get("parent_request_id") == request_id]
+
+    def for_admission(self, admission_id):
+        with self.connect() as db:
+            records = [json.loads(row[0]) for row in db.execute("SELECT record FROM requests ORDER BY rowid")]
+        return [r for r in records if r.get('producer_admission_id') == admission_id]
 
 
 class HandoffService:
@@ -218,7 +227,8 @@ class HandoffService:
         if record.get("kind") == "coordination":
             result.update(document=record["document"], target_endpoint=record["target_endpoint"])
             result.update({k: record[k] for k in ("outcome", "parent_request_id", "root_request_id",
-                                                 "continuation_confirmed") if k in record})
+                                                 "continuation_confirmed", "producer_admission_id",
+                                                 "request_first_tool", "origin_first_tool") if k in record})
         return result
 
     def busy(self, source, key):
@@ -322,6 +332,8 @@ class HandoffService:
         # A queued successor does not invalidate this event's completed private receipt.
         if receipt.interrupted:
             outcome["generated"] = False
+        if record.get('producer_admission_id') and outcome.get('first_tool'):
+            await asyncio.to_thread(self.journal.update, request_id, **{phase + '_first_tool': outcome['first_tool']})
         return outcome
 
     async def return_result(self, record, source):

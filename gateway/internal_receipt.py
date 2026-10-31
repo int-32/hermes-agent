@@ -15,6 +15,7 @@ class InternalTurnReceipt:
     generated: bool = False
     interrupted: bool = False
     message_ids: list[str] = field(default_factory=list)
+    first_tool: dict | None = None
 
 
 def receipt_for(event):
@@ -22,19 +23,43 @@ def receipt_for(event):
     return receipt if event is not None and event.internal and isinstance(receipt, InternalTurnReceipt) else None
 
 
-def capture_internal_response(event, response: str, *, successful: bool) -> None:
+def first_tool_result(result):
+    """Only this producer-stamped turn's tool/result pair, never an old history call."""
+    messages = result.get('messages') or []
+    if result.get('_messages_are_turn_suffix') is not True:
+        anchor = result.get('current_turn_user_idx')
+        if not (type(anchor) is int and 0 <= anchor < len(messages) and messages[anchor].get('role') == 'user'):
+            return None
+        messages = messages[anchor + 1:]
+    for message in messages:
+        if message.get('role') != 'assistant':
+            continue
+        for call in message.get('tool_calls') or []:
+            name, call_id = (call.get('function') or {}).get('name'), call.get('id')
+            if isinstance(name, str) and name and call_id:
+                return {'name': name, 'call_id': call_id, 'result_seen': any(
+                    m.get('role') == 'tool' and m.get('tool_call_id') == call_id for m in messages)}
+    return None
+
+
+def capture_internal_response(event, response: str, *, successful: bool, agent_result=None) -> None:
     receipt = receipt_for(event)
     if receipt is not None:
         receipt.response = str(response or "")
         receipt.generated = successful and bool(receipt.response) and not receipt.interrupted
+        if receipt.generated and agent_result is not None:
+            receipt.first_tool = first_tool_result(agent_result)
 
 
 def finish_internal_receipt(event, outcome: ProcessingOutcome) -> None:
     receipt = receipt_for(event)
     if receipt is not None and not receipt.future.done():
-        receipt.future.set_result({"response": receipt.response, "generated": receipt.generated,
-                                   "delivered": outcome == ProcessingOutcome.SUCCESS and not receipt.interrupted,
-                                   "message_ids": list(receipt.message_ids)})
+        result = {"response": receipt.response, "generated": receipt.generated,
+                  "delivered": outcome == ProcessingOutcome.SUCCESS and not receipt.interrupted,
+                  "message_ids": list(receipt.message_ids)}
+        if receipt.first_tool is not None:
+            result['first_tool'] = dict(receipt.first_tool)
+        receipt.future.set_result(result)
 
 
 def capture_internal_delivery(event, result):
