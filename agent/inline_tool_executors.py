@@ -15,6 +15,7 @@ from importlib import import_module
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from tools.arg_coercion import coerce_tool_args
+from tools.registry import invoke_tool_handler
 
 
 def tool_hook_ids(agent, effective_task_id: str, tool_call_id: Optional[str]) -> dict[str, str]:
@@ -304,7 +305,7 @@ _RAW_INLINE_TOOL_EXECUTORS: dict[str, InlineToolExecutor] = {
 
 def _coerced(name: str, executor: InlineToolExecutor) -> InlineToolExecutor:
     def _exec(agent, args: dict, ctx: InlineToolContext) -> Any:
-        return executor(agent, coerce_tool_args(name, args), ctx)
+        return invoke_tool_handler(name, executor, agent, coerce_tool_args(name, args), ctx)
     return _exec
 
 
@@ -328,7 +329,7 @@ def resolve_invoke_tool_executor(agent, function_name: str) -> Optional[InlineTo
         return INLINE_TOOL_EXECUTORS[function_name]
     memory_manager = agent._memory_manager
     if memory_manager and memory_manager.has_tool(function_name):
-        return lambda agent, args, ctx: agent._memory_manager.handle_tool_call(
+        return lambda agent, args, ctx: invoke_tool_handler(function_name, agent._memory_manager.handle_tool_call,
             function_name, args,
             caller_gsk=(getattr(agent, "_gateway_session_key", "") or ""),
         )

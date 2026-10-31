@@ -84,7 +84,7 @@ def responder(home, held=None, release=None, owner_loss=False, first_action='hot
             return ToolCall('read_file', {'path': str(home / 'note.txt')}) if phase == 0 else Text('producer queued')
         if 'Scheduled task check;' in text:
             if first_action == 'none':
-                actions = [ToolCall('tool_call', '[]'), ToolCall('tool_search', {'query': 'read a file'}), Text('no action')]
+                actions = [ToolCall('tool_call', '[]'), ToolCall('tool_search', {'queries': ['read a file']}), Text('no action')]
                 return actions[min(phase, len(actions) - 1)]
             if owner_loss and phase == 0:
                 held.set()

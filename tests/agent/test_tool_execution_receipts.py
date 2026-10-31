@@ -1,4 +1,8 @@
-"""Real agent/executor results, with only the provider replaced by a loopback peer."""
+"""Real producer contracts; unavailable names test validation, not bridge execution.
+
+Actual cold bridge/parser/discovery paths are covered by test_cron_watch_native.
+Multiple file calls here assert results, not concurrent scheduling.
+"""
 import json
 
 import pytest
@@ -7,8 +11,8 @@ from gateway.internal_receipt import first_tool_result
 from tests.fakes.fake_llm_provider import FakeLLMServer, Text, ToolCall, write_hermes_home
 
 
-@pytest.mark.parametrize('mode', ['hot', 'parallel-hot', 'invalid-before-hot', 'only-invalid', 'malformed-json', 'discovery',
-                                 'describe', 'scope-block', 'unknown', 'middleware-skip', 'preflight-error', 'business-error', 'cancel-before-tool'])
+@pytest.mark.parametrize('mode', ['hot', 'multi-read', 'unavailable-bridge-before-hot', 'unavailable-bridge', 'malformed-unavailable-bridge', 'unavailable-search',
+                                 'unavailable-describe', 'unavailable-coordinate-bridge', 'unknown', 'middleware-skip', 'preflight-error', 'business-error', 'cancel-before-tool'])
 def test_first_business_tool_uses_actual_execution_result(tmp_path, mode):
     from hermes_constants import get_hermes_home
     from hermes_state import SessionDB
@@ -21,14 +25,14 @@ def test_first_business_tool_uses_actual_execution_result(tmp_path, mode):
     hot = ToolCall('read_file', {'path': str(path if mode != 'business-error' else tmp_path / 'missing')})
     scripts = {
         'hot': [hot], 'business-error': [hot], 'middleware-skip': [hot], 'preflight-error': [hot],
-        'invalid-before-hot': [ToolCall('tool_call', '[]'), hot],
-        'only-invalid': [ToolCall('tool_call', '[]')],
-        'malformed-json': [ToolCall('tool_call', '{')],
-        'discovery': [ToolCall('tool_search', {'query': 'read a file'})],
-        'scope-block': [ToolCall('tool_call', {'name': 'coordinate_session', 'arguments': {}})],
-        'describe': [ToolCall('tool_describe', {'names': ['coordinate_session']})],
+        'unavailable-bridge-before-hot': [ToolCall('tool_call', '[]'), hot],
+        'unavailable-bridge': [ToolCall('tool_call', '[]')],
+        'malformed-unavailable-bridge': [ToolCall('tool_call', '{')],
+        'unavailable-search': [ToolCall('tool_search', {'queries': ['read a file']})],
+        'unavailable-coordinate-bridge': [ToolCall('tool_call', {'name': 'coordinate_session', 'arguments': {}})],
+        'unavailable-describe': [ToolCall('tool_describe', {'names': ['coordinate_session']})],
         'unknown': [ToolCall('r1_nonexistent_tool', {})],
-        'parallel-hot': [ToolCall('read_file', {'path': str(path)}, parallel=[('read_file', {'path': str(other)})])],
+        'multi-read': [ToolCall('read_file', {'path': str(path)}, parallel=[('read_file', {'path': str(other)})])],
         'cancel-before-tool': [hot],
     }
     scripted = iter([*scripts[mode], Text('done')])
@@ -72,8 +76,11 @@ def register(ctx):
         try:
             result = agent.run_conversation('Execute the scripted isolated tool check.')
             evidence = first_tool_result(result)
+            if mode.startswith('unavailable-'):
+                assert any('Available tools' in str(m.get('content')) for m in result['messages']
+                           if m.get('role') == 'tool')
             print(json.dumps({'mode': mode, 'result': result, 'first_business_tool': evidence}, default=str))
-            if mode in {'hot', 'parallel-hot', 'invalid-before-hot', 'business-error'}:
+            if mode in {'hot', 'multi-read', 'unavailable-bridge-before-hot', 'business-error'}:
                 assert evidence and evidence['name'] == 'read_file' and evidence['result_seen'] is True, evidence
             else:
                 assert evidence is None, evidence
@@ -83,7 +90,7 @@ def register(ctx):
             if mode == 'middleware-skip':
                 assert (get_hermes_home() / 'r1-middleware-seen').is_file()
                 assert any(m.get('role') == 'tool' for m in result['messages'])
-            if mode == 'parallel-hot':
+            if mode == 'multi-read':
                 assert len([m for m in result['messages'] if m.get('role') == 'tool'
                             and (m.get('display_metadata') or {}).get('tool_execution')]) == 2
         finally:

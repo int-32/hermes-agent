@@ -25,6 +25,52 @@ from hermes_constants import hermes_home_key, normalize_scope
 logger = logging.getLogger(__name__)
 
 _session_tool_scope = ContextVar("session_tool_scope", default=None)
+_tool_execution = ContextVar("tool_handler_execution", default=None)
+
+
+@dataclass
+class ToolExecution:
+    name: str
+    call_id: str
+    entered: bool = False
+
+
+@contextmanager
+def collect_tool_execution(name: str, call_id: str):
+    """Call-local observation, not a permission grant or model/presentation payload."""
+    observation = ToolExecution(name, call_id)
+    token = _tool_execution.set(observation)
+    try:
+        yield observation
+    finally:
+        _tool_execution.reset(token)
+
+
+def invoke_tool_handler(name, handler, *args, _await_result=False, **kwargs):
+    """Observe the actual business entry, after dispatch gates and argument binding.
+
+    Opaque/invalid signatures cannot supply positive evidence; ordinary calling
+    behavior is retained. Async evidence starts on await, not coroutine creation.
+    """
+    observation = _tool_execution.get()
+    if observation is not None and observation.name == name:
+        try:
+            inspect.signature(handler).bind(*args, **kwargs)
+        except (TypeError, ValueError):
+            observation = None
+    else:
+        observation = None
+
+    def call():
+        if observation is not None:
+            observation.entered = True
+        return handler(*args, **kwargs)
+
+    if _await_result or inspect.iscoroutinefunction(handler):
+        async def run():
+            return await call()
+        return run()
+    return call()
 
 
 @contextmanager
@@ -957,9 +1003,9 @@ class ToolRegistry:
             kwargs = _kwargs_accepted_by(entry.handler, kwargs)
             if entry.is_async:
                 from model_tools import _run_async
-                result = _run_async(entry.handler(args, **kwargs))
+                result = _run_async(invoke_tool_handler(name, entry.handler, args, _await_result=True, **kwargs))
             else:
-                result = entry.handler(args, **kwargs)
+                result = invoke_tool_handler(name, entry.handler, args, **kwargs)
             return self._normalize_handler_result(name, result)
         except Exception as e:
             # exc_info already renders the exception, so keep the message copy bounded.

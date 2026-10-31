@@ -754,13 +754,13 @@ def _dispatch_authorized_once(
     _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
     from agent.tool_progress_relay import bound_tool_progress
     from tools.connectors.data_use import collect_data_use
-    with bound_tool_progress(agent.tool_progress_callback, ref.name, ref.call_id), collect_data_use() as data_use:
-        def invoke():
-            state.executed = True
-            return execute(ref.args)
+    from tools.registry import collect_tool_execution
+    with (bound_tool_progress(agent.tool_progress_callback, ref.name, ref.call_id), collect_data_use() as data_use,
+          collect_tool_execution(ref.name, ref.call_id) as execution):
         try:
-            return _run_with_activity_heartbeat(agent, ref.name, invoke)
+            return _run_with_activity_heartbeat(agent, ref.name, lambda: execute(ref.args))
         finally:
+            state.executed = execution.entered
             state.data_use = frozenset(data_use)
 
 
@@ -1687,6 +1687,7 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
     """Pick the execute callable for one sequential call and start its spinner. Precedence:
     inline agent-level tools, delegate_task, context-engine tools, memory-provider tools,
     then the registry."""
+    from tools.registry import invoke_tool_handler
     function_name, function_args, effective_task_id, tool_call_id, middleware_trace = (
         ref.name, ref.args, ref.task_id, ref.call_id, ref.trace,
     )
@@ -1698,10 +1699,12 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
     if function_name == "delegate_task":
         spinner = _start_quiet_tool_spinner(agent, function_name, function_args, label=_delegate_spinner_label(function_args))
         agent._delegate_spinner = spinner
-        return _SequentialDispatch(agent._dispatch_delegate_task, spinner=spinner, is_delegate=True)
+        return _SequentialDispatch(lambda args: invoke_tool_handler(function_name, agent._dispatch_delegate_task, args),
+                                   spinner=spinner, is_delegate=True)
     if agent._context_engine_tool_names and function_name in agent._context_engine_tool_names:
         return _SequentialDispatch(
-            execute=lambda next_args: agent.context_compressor.handle_tool_call(function_name, next_args, messages=messages),
+            execute=lambda next_args: invoke_tool_handler(function_name, agent.context_compressor.handle_tool_call,
+                                                         function_name, next_args, messages=messages),
             spinner=_start_quiet_tool_spinner(agent, function_name, function_args, gate=False),
             error_result=lambda e: json.dumps({"error": f"Context engine tool '{function_name}' failed: {e}"}),
             error_log="context_engine.handle_tool_call raised for %s: %s",
@@ -1709,7 +1712,7 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
     if agent._memory_manager and agent._memory_manager.has_tool(function_name):
         # Memory-provider tools (hindsight_retain, honcho_search, ...) are not in the registry.
         return _SequentialDispatch(
-            execute=lambda next_args: agent._memory_manager.handle_tool_call(
+            execute=lambda next_args: invoke_tool_handler(function_name, agent._memory_manager.handle_tool_call,
                 function_name, next_args,
                 caller_gsk=(getattr(agent, "_gateway_session_key", "") or ""),
             ),

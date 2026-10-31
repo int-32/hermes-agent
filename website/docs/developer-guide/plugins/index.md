@@ -1923,7 +1923,8 @@ can complete the check. Queued, missing, unknown or uncorrelated output stays
 incomplete. Text in the request is untrusted data, never identity or permission.
 The initial main action and both private phases require their own current-turn
 business execution/result correlation. The executor records the actual invoked
-tool name and call ID in internal durable metadata after its policy gates; a cold
+tool name and call ID in internal durable metadata at the business handler or
+inline entry, after dispatch policy gates (including ACP edit approval); a cold
 `tool_call` retains its original transcript name. Discovery, bridge parsing
 errors and calls skipped before execution cannot supply this evidence. An actual
 business-tool attempt that returns an error can supply it, without proving
