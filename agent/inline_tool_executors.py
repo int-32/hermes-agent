@@ -10,7 +10,7 @@ lazily at call time so ``patch("tools.x.y")`` in tests keeps working.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import import_module
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -93,6 +93,7 @@ class InlineToolContext:
     effective_task_id: str
     tool_call_id: Optional[str] = None
     messages: Optional[list] = None
+    tool_name: str = ""
 
 
 InlineToolExecutor = Callable[[Any, dict, InlineToolContext], Any]
@@ -101,10 +102,10 @@ InlineToolExecutor = Callable[[Any, dict, InlineToolContext], Any]
 _ArgSpec = tuple[Any, ...]
 
 
-def _call_tool(module: str, func: str, args: dict, arg_specs: tuple[_ArgSpec, ...], **fixed: Any) -> Any:
+def _call_tool(name: str, module: str, func: str, args: dict, arg_specs: tuple[_ArgSpec, ...], **fixed: Any) -> Any:
     """Import ``module.func`` lazily and call it with args mapped per ``arg_specs`` plus ``fixed``."""
     fn = getattr(import_module(module), func)
-    return fn(**{spec[0]: args.get(*spec[1:]) for spec in arg_specs}, **fixed)
+    return invoke_tool_handler(name, fn, **{spec[0]: args.get(*spec[1:]) for spec in arg_specs}, **fixed)
 
 
 def _tool(
@@ -112,7 +113,7 @@ def _tool(
 ) -> InlineToolExecutor:
     """Executor calling ``module.func`` with mapped args plus ``fixed`` kwargs computed from ``(agent, ctx)``."""
     def _exec(agent, args: dict, ctx: InlineToolContext) -> Any:
-        return _call_tool(module, func, args, arg_specs, **{k: f(agent, ctx) for k, f in fixed.items()})
+        return _call_tool(ctx.tool_name, module, func, args, arg_specs, **{k: f(agent, ctx) for k, f in fixed.items()})
     return _exec
 
 
@@ -128,7 +129,7 @@ def _session_search(agent, args: dict, ctx: InlineToolContext) -> Any:
 
         return json.dumps({"success": False, "error": format_session_db_unavailable()})
     return _call_tool(
-        "tools.session_search_tool", "session_search", args,
+        ctx.tool_name, "tools.session_search_tool", "session_search", args,
         (
             ("query", "query", ""), ("role_filter", "role_filter"), ("limit", "limit", 3),
             ("session_id", "session_id"), ("around_message_id", "around_message_id"),
@@ -142,7 +143,7 @@ def _session_search(agent, args: dict, ctx: InlineToolContext) -> Any:
 
 def _memory(agent, args: dict, ctx: InlineToolContext) -> Any:
     result = _call_tool(
-        "tools.memory_tool", "memory_tool", args,
+        ctx.tool_name, "tools.memory_tool", "memory_tool", args,
         (
             ("action", "action"), ("target", "target"), ("content", "content"),
             ("old_text", "old_text"), ("new_text", "new_text"), ("operations", "operations"),
@@ -176,7 +177,7 @@ def _desktop_preview(agent, args: dict, ctx: InlineToolContext) -> Any:
         return _read_preview(agent, args, ctx)
     from tools.preview_tool import _handle_preview
 
-    return _handle_preview(args)
+    return invoke_tool_handler(ctx.tool_name, _handle_preview, args)
 
 
 def _manage_connections(agent, args: dict, ctx: InlineToolContext) -> Any:
@@ -184,7 +185,7 @@ def _manage_connections(agent, args: dict, ctx: InlineToolContext) -> Any:
     from tools.connectors import manage_connections
     from tools.connectors.gateway import config as gateway_config
 
-    result = manage_connections(
+    result = invoke_tool_handler(ctx.tool_name, manage_connections,
         args, session_id=getattr(agent, "session_id", None), tool_call_id=ctx.tool_call_id,
         turn_id=getattr(agent, "_current_turn_id", None) or None,
         connection_callback=getattr(agent, "connection_callback", None),
@@ -220,7 +221,7 @@ def _manage_catalog(agent, args: dict, ctx: InlineToolContext) -> Any:
     # The card callback lives on the agent; only a desktop chat draws catalog rows.
     from tools.connectors.catalog_tool import manage_catalog
 
-    return manage_catalog(
+    return invoke_tool_handler(ctx.tool_name, manage_catalog,
         args, session_id=getattr(agent, "session_id", None), tool_call_id=ctx.tool_call_id,
         connection_callback=getattr(agent, "connection_callback", None),
         card_surface=getattr(agent, "platform", None) == "desktop",
@@ -234,7 +235,7 @@ def _setup_beat(agent, args: dict, ctx: InlineToolContext) -> Any:
     from agent.interrupt_control import _REASON_NEW_MESSAGE
     from tools.setup_beat_tool import setup_beat_tool
 
-    return setup_beat_tool(
+    return invoke_tool_handler(ctx.tool_name, setup_beat_tool,
         args, db=getattr(agent, "_session_db", None), session_id=getattr(agent, "session_id", None) or "",
         tool_call_id=ctx.tool_call_id or "", callback=getattr(agent, "setup_beat_callback", None),
         end_turn=lambda: agent.interrupt(tool_reason=_REASON_NEW_MESSAGE),
@@ -305,7 +306,9 @@ _RAW_INLINE_TOOL_EXECUTORS: dict[str, InlineToolExecutor] = {
 
 def _coerced(name: str, executor: InlineToolExecutor) -> InlineToolExecutor:
     def _exec(agent, args: dict, ctx: InlineToolContext) -> Any:
-        return invoke_tool_handler(name, executor, agent, coerce_tool_args(name, args), ctx)
+        # The table owns the canonical name, including replay aliases. Routing and
+        # argument assembly precede the actual business callable's observation.
+        return executor(agent, coerce_tool_args(name, args), replace(ctx, tool_name=name))
     return _exec
 
 
@@ -329,7 +332,7 @@ def resolve_invoke_tool_executor(agent, function_name: str) -> Optional[InlineTo
         return INLINE_TOOL_EXECUTORS[function_name]
     memory_manager = agent._memory_manager
     if memory_manager and memory_manager.has_tool(function_name):
-        return lambda agent, args, ctx: invoke_tool_handler(function_name, agent._memory_manager.handle_tool_call,
+        return lambda agent, args, ctx: agent._memory_manager.handle_tool_call(
             function_name, args,
             caller_gsk=(getattr(agent, "_gateway_session_key", "") or ""),
         )

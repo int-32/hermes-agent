@@ -601,8 +601,9 @@ class MemoryManager:
             kwargs = {k: v for k, v in kwargs.items() if k in accepted}
         args = _redact_for_provider(args)
         from hermes_cli.observability.shared_metrics_loop import record_provider_memory_call
+        from tools.registry import invoke_tool_handler
         try:
-            result = provider.handle_tool_call(tool_name, args, **kwargs)
+            result = invoke_tool_handler(tool_name, provider.handle_tool_call, tool_name, args, **kwargs)
         except Exception as e:
             logger.error("Memory provider '%s' handle_tool_call(%s) failed: %s", provider.name, tool_name, e)
             record_provider_memory_call(provider.name, tool_name, args, raised=True)

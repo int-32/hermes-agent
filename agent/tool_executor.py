@@ -1699,7 +1699,7 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
     if function_name == "delegate_task":
         spinner = _start_quiet_tool_spinner(agent, function_name, function_args, label=_delegate_spinner_label(function_args))
         agent._delegate_spinner = spinner
-        return _SequentialDispatch(lambda args: invoke_tool_handler(function_name, agent._dispatch_delegate_task, args),
+        return _SequentialDispatch(agent._dispatch_delegate_task,
                                    spinner=spinner, is_delegate=True)
     if agent._context_engine_tool_names and function_name in agent._context_engine_tool_names:
         return _SequentialDispatch(
@@ -1712,7 +1712,7 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
     if agent._memory_manager and agent._memory_manager.has_tool(function_name):
         # Memory-provider tools (hindsight_retain, honcho_search, ...) are not in the registry.
         return _SequentialDispatch(
-            execute=lambda next_args: invoke_tool_handler(function_name, agent._memory_manager.handle_tool_call,
+            execute=lambda next_args: agent._memory_manager.handle_tool_call(
                 function_name, next_args,
                 caller_gsk=(getattr(agent, "_gateway_session_key", "") or ""),
             ),
