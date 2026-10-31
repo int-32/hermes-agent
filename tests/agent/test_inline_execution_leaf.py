@@ -121,7 +121,10 @@ def test_custom_actual_business_refusals_keep_canonical_identity(name, args):
         and observation.name == name
         and observation.call_id == "alias-call"
     )
-    assert ctx.tool_name == ""  # The caller's context is not mutated by replay aliases.
+    # Routing preserves the caller's original task, call and message context.
+    assert (ctx.effective_task_id, ctx.tool_call_id, ctx.messages) == (
+        "task", "alias-call", None,
+    )
 
 
 def test_builtin_memory_attempt_survives_refused_provider_mirror(tmp_path, monkeypatch):
