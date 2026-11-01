@@ -270,11 +270,11 @@ def unresolved(full, projection, baseline, zoned):
     return counts, issues
 
 
-def verify(projection_path, checkpoint_path, *, stdin=None):
+def verify(projection_path, checkpoint_path, *, stdin=None, cache=None):
     report = dict(status='invalid', evidence_verified=False, ready_for_processing=False, issues=[],
                   consumption='UNVERIFIED', native_ack='UNVERIFIED', checkpoint_written=False,
                   collection_baseline_binding='UNVERIFIED_NOT_IN_OBSERVATION_FORMAT', full_content_returned=False)
-    cache = {}
+    cache = {} if cache is None else cache
     try:
         if str(projection_path) == '-':
             raw = (sys.stdin.buffer if stdin is None else stdin).read(collector.PROJECTION_BYTES + 1)

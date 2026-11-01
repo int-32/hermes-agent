@@ -265,3 +265,50 @@ do not establish source inventory truth, trusted owner acceptance, native reques
 association or permission to promote a candidate. Reuse this result for mechanical
 checks; full business reconciliation remains the original Agent's responsibility.
 This CLI adds no K writer and changes no accepted prompt/package or cron consumer.
+
+## Owner-explicit v2 checkpoint maintenance
+
+The processing prompt invokes the existing verifier once on the exact cached
+prerun JSON. Keep its bounded stdout as the round's verification evidence. No
+collector is rerun. A fresh verification inside the commit command is mechanical
+input validation after processing, not another business acceptance.
+
+After the original owner has actually processed the complete observation, use:
+
+```sh
+python scripts/task_owner_checkpoint.py commit --projection /absolute/projection.json --checkpoint /absolute/checkpoint.json --expected /absolute/verification.json --before /absolute/round/checkpoint.before.json
+```
+
+`--expected` is the existing verifier report with exact projection, O, K and
+referenced baseline byte identities, never a permission/processed assertion.
+The CLI reuses the real verifier and its call-local byte/JSON cache. Invalid,
+unknown, omitted/backlogged or false-gate observations do not write K. The only
+v2 changes are `consumed_fingerprints.snapshot_path` and ISO `observed_at` derived
+from the verified O clock. All other owner records/fields remain unchanged and
+remain the owner's responsibility; the command does not invent new business
+records or attest their meaning. No schema, collection-K binding or native ACK
+is added.
+
+The canonical K uses the existing `_FileLock` with a `.NAME.lock` sibling. Only
+participating commands share this lock. Symlink K paths resolve to that same
+namespace; multiply-hardlinked K is refused. Before-K output and all data input
+aliases are refused. An exclusive, exact before-K recovery file is saved in the
+round's existing evidence directory; existing evidence is verified, never silently
+overwritten. Keep O, before-K and the old baseline for recovery. Legacy/unlocked
+writers must be drained in the approved single-job runtime switch window; this
+is not a transaction against arbitrary same-UID filesystem mutation.
+
+Before publication every fixed input is reopened/stamp-checked, under the lock.
+The existing `utils.atomic_write_text(preserve_mode=True, fsync_dir=True)` owns
+publication, including its documented fallback. Its directory fsync is best-effort,
+not strict power-loss durability; interrupted copy fallback can be UNKNOWN.
+After any write outcome, read K back exactly. After response loss, use the SAME
+inputs and `reconcile` in place of `commit`: it never writes K. It compares exact
+before-K and deterministic target bytes: COMMITTED (exit0), NOT_COMMITTED (exit3),
+UNKNOWN/CONFLICT (exit4). Invalid evidence is exit2; unresolved/false gate is exit3.
+A repeated commit reconciles first and never overwrites a different/unknown K.
+Reports stay within 16 KiB and report any omitted paths explicitly. COMMITTED
+only describes this file update; consumption/native_ack stay UNVERIFIED.
+
+The new prompt/field deltas belong to a separately reviewed revision2 package.
+The old prompt/revision1 package, installed source, job and real K are unchanged.
