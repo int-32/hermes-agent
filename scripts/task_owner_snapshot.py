@@ -27,7 +27,6 @@ PROJECTION_BYTES = 16384
 PROJECTION_ITEMS = 20
 PROJECTION_ERRORS = 8
 SQLITE_INPUT_SUFFIXES = ("", "-wal", "-shm", "-journal")
-BOARD_INPUT_FILES = tuple("kanban.db" + suffix for suffix in SQLITE_INPUT_SUFFIXES)
 
 
 def encoded(value, *, ensure_ascii=False):
@@ -93,7 +92,7 @@ def check_board_coverage(previous, result):
     result["delta"]["removed_tasks"] = [dict(database=db, id=tid) for db, tid in sorted(removed) if db in observed]
 
 
-def directories(root, *, protected=None, source_files=()):
+def directories(root, *, protected=None, source_files=(), board_result=None):
     # Path.glob can suppress permission/read errors as if inventory were empty.
     try:
         paths = sorted(root.iterdir())
@@ -110,6 +109,8 @@ def directories(root, *, protected=None, source_files=()):
         # Unknown entries stay protected, but ordinary artifact files are not directories.
         if is_directory is not False and protected is not None:
             protected.update(path / name for name in source_files)
+            if board_result is not None:
+                protect_board_inputs(path / "kanban.db", protected, board_result)
         if is_directory:
             found.append(path)
     if failure is not None:
@@ -141,8 +142,8 @@ def history(conn, tables, task_id, *, tail=False):
     return changes.hexdigest(), recent[-2:]
 
 
-def collect_board(path, profile, previous, result):
-    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as conn:
+def collect_board(path, resolved, profile, previous, result):
+    with closing(sqlite3.connect(resolved.as_uri() + "?mode=ro", uri=True, timeout=5)) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")
         conn.execute("BEGIN")
@@ -279,22 +280,30 @@ def collect_workers(home, previous, result, now, protected):
             error(result, path, exc)
 
 
-def protect_board_inputs(path, protected):
-    # SQLite can read committed rows from WAL and consult its other reserved companion files.
+def protect_board_inputs(path, protected, result):
+    """Register the logical and actual SQLite I/O closure; return the path to open."""
     protected.update(Path(str(path) + suffix) for suffix in SQLITE_INPUT_SUFFIXES)
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError) as exc:
+        error(result, path, exc)
+        return None
+    # SQLite derives companions from the filename in its opened URI, not a symlink's name.
+    protected.update(Path(str(resolved) + suffix) for suffix in SQLITE_INPUT_SUFFIXES)
+    return resolved
 
 
-def observation_inputs(home, previous, protected):
+def observation_inputs(home, previous, protected, result):
     """Call-local paths, including confirmed sources now absent or hidden by inventory errors."""
     if protected is None:
         protected = set()
-    protect_board_inputs(home / "kanban.db", protected)
+    protect_board_inputs(home / "kanban.db", protected, result)
     for board in previous.get("boards", []):
-        protect_board_inputs(Path(board["database"]), protected)
+        protect_board_inputs(Path(board["database"]), protected, result)
     for item in previous.get("errors", []):
         source = Path(item["source"])
         if item.get("reason") == "previous_board_unavailable" or source.name == "kanban.db":
-            protect_board_inputs(source, protected)
+            protect_board_inputs(source, protected, result)
         elif source.name in ("meta.json", "events.jsonl") and source.parent.parent.name == "workers":
             protected.update((source.parent / "meta.json", source.parent / "events.jsonl"))
     for item in previous.get("executors", []):
@@ -306,31 +315,33 @@ def observation_inputs(home, previous, protected):
 def collect(home, previous=None, *, now=None, protected=None):
     now = time.time() if now is None else now
     previous = previous or {}
-    protected = observation_inputs(home, previous, protected)
     result = {"schema": SCHEMA, "boards": [], "executors": [], "errors": [], "observed_at": now,
               "delta": {"tasks": [], "executors": [], "removed_tasks": [], "removed_executors": []}}
+    protected = observation_inputs(home, previous, protected, result)
     try:
         if not home.is_dir():
             raise FileNotFoundError("observation home missing")
         old_tasks = task_index(previous)
         homes = [("default", home), *((path.name, path) for path in directories(
-            home / "profiles", protected=protected, source_files=BOARD_INPUT_FILES))]
+            home / "profiles", protected=protected, board_result=result))]
         seen = set()
         for profile, root in homes:
-            protect_board_inputs(root / "kanban.db", protected)
+            protect_board_inputs(root / "kanban.db", protected, result)
             candidates = [root / "kanban.db", *(path / "kanban.db" for path in directories(
-                root / "kanban" / "boards", protected=protected, source_files=BOARD_INPUT_FILES))]
+                root / "kanban" / "boards", protected=protected, board_result=result))]
             for path in candidates:
-                protect_board_inputs(path, protected)
+                resolved = protect_board_inputs(path, protected, result)
+                if resolved is None:
+                    continue
                 try:
                     path.stat()
                 except FileNotFoundError:
                     continue
-                if path.resolve() in seen:
+                if resolved in seen:
                     continue
-                seen.add(path.resolve())
+                seen.add(resolved)
                 try:
-                    collect_board(path, profile, old_tasks, result)
+                    collect_board(path, resolved, profile, old_tasks, result)
                 except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
                     error(result, path, exc)
         if not seen:

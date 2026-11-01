@@ -1057,3 +1057,126 @@ def test_normal_artifact_file_in_inventory_root_can_be_written_again(fixture, di
         p, value = cli(fixture, output)
         assert p.returncode == 0 and value["snapshot_artifact"] is not None
         assert value["snapshot_artifact"]["sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
+
+
+# ADAPTER-R1-RESOLVED-SQLITE: independent assertions, test-owned evidence destination.
+@pytest.mark.parametrize("source_alias", ["file_symlink", "parent_symlink"])
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+@pytest.mark.parametrize("output_alias", ["direct", "hardlink_fallback"])
+def test_resolved_sqlite_companion_protected(tmp_path, source_alias, suffix, output_alias):
+    home = tmp_path / "home"
+    home.mkdir()
+    real = tmp_path / "storage" / "actual.db"
+    real.parent.mkdir()
+    writer = sqlite3.connect(real)
+    target = before = None
+    try:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        writer.execute("CREATE TABLE tasks(id TEXT PRIMARY KEY,status TEXT)")
+        writer.commit()
+        writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        writer.execute("INSERT INTO tasks VALUES('only-in-wal','running')")
+        writer.commit()
+        # Real committed row is absent from checkpointed main DB.
+        with sqlite3.connect(real.as_uri()+"?mode=ro&immutable=1",uri=True) as checkpointed:
+            assert checkpointed.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0
+        if source_alias == "file_symlink":
+            (home / "kanban.db").symlink_to(real)
+        else:
+            # Parent-directory alias resolves companion suffixes normally.
+            (real.parent / "kanban.db").symlink_to(real.name)
+            (home / "profiles").mkdir()
+            (home / "profiles" / "peer").symlink_to(real.parent,target_is_directory=True)
+            # Use canonical filename to isolate parent-directory-only alias.
+            (real.parent / "kanban.db").unlink()
+            writer.close()
+            real.rename(real.parent / "kanban.db")
+            real = real.parent / "kanban.db"
+            writer = sqlite3.connect(real)
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            writer.execute("INSERT INTO tasks VALUES('second-wal-row','running')")
+            writer.commit()
+        code, observed = cli(home)
+        assert code.returncode == 0 and observed["boards"][0]["tasks"]
+        target = real.with_name(real.name + suffix)
+        before = target.read_bytes()
+        output = target
+        prepare = ""
+        if output_alias == "hardlink_fallback":
+            output = tmp_path / "artifact.json"
+            os.link(target, output)
+            prepare = 'import utils,errno\ndef busy(*a,**kw): raise OSError(errno.EXDEV,"fixture")\nutils.os.replace=busy'
+        result, value = cli(home, output, prepare=prepare)
+        after = target.read_bytes()
+        observation = {"source_alias":source_alias,"suffix":suffix,"output_alias":output_alias,
+                       "exit":result.returncode,"source_changed":after != before,
+                       "before_size":len(before),"after_size":len(after),"artifact":value["snapshot_artifact"],
+                       "observed_task_ids":[x["id"] for x in observed["boards"][0]["tasks"]]}
+        case = source_alias + suffix + "-" + output_alias
+        evidence = (tmp_path / 'evidence') / case
+        evidence.mkdir(parents=True, exist_ok=True)
+        (evidence / "before.bin").write_bytes(before)
+        (evidence / "after.bin").write_bytes(after)
+        (evidence / "stdout.json").write_text(result.stdout)
+        (evidence / "stderr.txt").write_text(result.stderr)
+        (evidence / "observation.json").write_text(json.dumps(observation,indent=2))
+        print(json.dumps(observation))
+        assert result.returncode == 2 and value["snapshot_artifact"] is None and (after == before if suffix == "-wal" else len(after) == len(before) and not after.startswith(b"{")), observation
+    finally:
+        # Restore test-owned mapped companion before closing writer: avoid SIGBUS in teardown.
+        if target is not None and before is not None:
+            target.write_bytes(before)
+        try:
+            writer.close()
+        except sqlite3.Error:
+            pass
+
+
+@pytest.mark.parametrize("state", ["invalid", "missing", "inventory", "prior_error"])
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+def test_resolved_companions_survive_failed_and_unreached_sources(tmp_path, state, suffix):
+    home = tmp_path / "home"
+    home.mkdir()
+    actual = tmp_path / "storage" / "actual.db"
+    actual.parent.mkdir()
+    actual.write_bytes(b"invalid sqlite source")
+    logical = home / "kanban.db"
+    if state == "inventory":
+        peer = home / "profiles/z-peer"
+        peer.mkdir(parents=True)
+        logical = peer / "kanban.db"
+        bad = home / "profiles/a-loop"
+        bad.symlink_to(bad.name, target_is_directory=True)
+    logical.symlink_to(actual)
+    if state == "missing":
+        actual.unlink()
+    extra = []
+    if state == "prior_error":
+        logical.unlink()
+        # A prior confirmed source may have a noncanonical basename, behind unreadable inventory.
+        known = home / "custom.db"
+        known.symlink_to(actual)
+        previous = tmp_path / "previous.json"
+        previous.write_text(json.dumps({"schema": "task-owner-observation/v1", "boards": [], "executors": [],
+            "errors": [{"source": str(known), "reason": "previous_board_unavailable"}]}))
+        extra = ["--previous", previous]
+        (home / "profiles").symlink_to("profiles", target_is_directory=True)
+    target = actual.with_name(actual.name + suffix)
+    target.write_bytes(b"caller-owned reserved companion")
+    before = target.read_bytes()
+    result, value = cli(home, target, *extra)
+    assert result.returncode == 2 and value["snapshot_artifact"] is None
+    assert "snapshot_write_error" in value["reasons"]
+    assert target.read_bytes() == before
+
+
+def test_sqlite_resolution_failure_cannot_publish_success(home):
+    output = home / "diagnostic.json"
+    prepare = 'from pathlib import Path\nresolve=Path.resolve\ndef fail(path,*a,**kw):\n if path.name=="kanban.db": raise OSError("fixture resolve failure")\n return resolve(path,*a,**kw)\nPath.resolve=fail'
+    result, value = cli(home, output, prepare=prepare)
+    assert result.returncode == 2 and value["wakeAgent"]
+    assert value["snapshot_artifact"] is None and not output.exists()
+    assert "read_error" in value["reasons"]
+    recovered, saved = cli(home, output)
+    assert recovered.returncode == 0 and saved["snapshot_artifact"] is not None

@@ -63,7 +63,14 @@ missing parents are created through the helper. Output paths resolving to
 relative paths, symlinks, directory aliases and existing hardlinks. These checks
 also protect this invocation's observation inputs: discovered
 Kanban databases (including SQLite's reserved WAL/SHM/journal paths), worker
-metadata and event streams. A call-local set records paths before I/O, including
+metadata and event streams. Each DB registration includes both its logical path
+and its resolved DB path, with companions derived from **each filename**. The
+same resolved object returned by registration supplies SQLite's read-only URI;
+file symlinks cannot hide companions under the target DB's different basename.
+This also applies before reading failed/missing DBs, to prior/error sources and
+to discovered inventory candidates even when a sibling stops collection.
+Resolution failures enter the existing errors and return nonzero; an unresolved
+identity is never treated as safe publication. A call-local set records paths before I/O, including
 failed reads and missing candidates. Inventory checks finish the same directory's
 stat pass to register directory/unknown candidates before rethrowing its first
 error; ordinary artifact files are excluded. Prior board/worker observations and source
