@@ -89,52 +89,61 @@ class HandoffJournal:
     def enqueue(self, record):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT record FROM requests WHERE id=?", (record["request_id"],)).fetchone()
-            if row:
-                existing = json.loads(row[0])
-                same_task = all(existing.get(k) == record.get(k) for k in (
-                    "request_id", "message", "source_key", "caller_home", "target_key",
-                    "kind", "source_endpoint", "target_endpoint", "source_profile", "target_profile", "lineage"))
-                same_task = same_task and all(existing.get(k) == record.get(k) for k in (
-                    "protocol", "parent_request_id", "root_request_id", "producer_admission_id"))
-                if not same_task or _route_anchor(existing.get("origin")) != _route_anchor(record.get("origin")):
-                    raise ValueError("request_id reused with a different origin or message")
-                return existing
-            producer = record.get('producer_admission_id')
-            if producer and db.execute("SELECT 1 FROM requests WHERE json_extract(record, '$.producer_admission_id')=?",
-                                       (producer,)).fetchone():
-                raise PermissionError('watch admission already has its private work request')
-            parent_id = record.get("parent_request_id")
-            if parent_id:
-                parent_row = db.execute("SELECT record FROM requests WHERE id=?", (parent_id,)).fetchone()
-                parent = json.loads(parent_row[0]) if parent_row else {}
-                if (parent.get("status") not in {"running", "waiting_children"}
-                        or parent.get("target_key") != record["source_key"]
-                        or parent.get("root_request_id") != record["root_request_id"]
-                        or any(parent.get("document", {}).get(k) != record["document"].get(k)
-                               for k in ("task_id", "project"))):
-                    raise PermissionError("dependency parent is not an active native request")
-                siblings = [json.loads(raw[0]) for raw in db.execute("SELECT record FROM requests")]
-                if sum(r.get("parent_request_id") == parent_id for r in siblings) >= 4:
-                    raise PermissionError("bounded dependency dispatch limit reached")
-            record = {**record, "status": "queued", "created_at": time.time(), "updated_at": time.time()}
-            db.execute("INSERT INTO requests VALUES (?, ?)", (record["request_id"], json.dumps(record)))
+            return self._enqueue(db, record)
+
+    def _enqueue(self, db, record):
+        row = db.execute("SELECT record FROM requests WHERE id=?", (record["request_id"],)).fetchone()
+        if row:
+            existing = json.loads(row[0])
+            same_task = all(existing.get(k) == record.get(k) for k in (
+                "request_id", "message", "source_key", "caller_home", "target_key",
+                "kind", "source_endpoint", "target_endpoint", "source_profile", "target_profile", "lineage"))
+            same_task = same_task and all(existing.get(k) == record.get(k) for k in (
+                "protocol", "parent_request_id", "root_request_id", "producer_admission_id", "stage_after_request_id"))
+            if not same_task or _route_anchor(existing.get("origin")) != _route_anchor(record.get("origin")):
+                raise ValueError("request_id reused with a different origin or message")
+            return existing
+        producer = record.get('producer_admission_id')
+        if producer and db.execute("SELECT 1 FROM requests WHERE json_extract(record, '$.producer_admission_id')=?",
+                                   (producer,)).fetchone():
+            raise PermissionError('watch admission already has its private work request')
+        parent_id = record.get("parent_request_id")
+        if parent_id:
+            parent_row = db.execute("SELECT record FROM requests WHERE id=?", (parent_id,)).fetchone()
+            parent = json.loads(parent_row[0]) if parent_row else {}
+            if (parent.get("status") not in {"running", "waiting_children"}
+                    or parent.get("target_key") != record["source_key"]
+                    or parent.get("root_request_id") != record["root_request_id"]
+                    or any(parent.get("document", {}).get(k) != record["document"].get(k)
+                           for k in ("task_id", "project"))):
+                raise PermissionError("dependency parent is not an active native request")
+            siblings = [json.loads(raw[0]) for raw in db.execute("SELECT record FROM requests")]
+            if sum(r.get("parent_request_id") == parent_id for r in siblings) >= 4:
+                raise PermissionError("bounded dependency dispatch limit reached")
+        record = {**record, "status": "queued", "created_at": time.time(), "updated_at": time.time()}
+        db.execute("INSERT INTO requests VALUES (?, ?)", (record["request_id"], json.dumps(record)))
         return record
 
     def update(self, request_id, **changes):
         return self.update_many({request_id: changes})[request_id]
 
-    def update_many(self, changes_by_id, *, guard=None):
+    def update_many(self, changes_by_id, *, guard=None, successor=None, prepare=None):
         updated = {}
-        with self.connect() as db:
+        # Decide stage association under the same ownership/SQLite boundary as COMMIT.
+        # In particular, a bridge deadline does not stop a previously submitted writer.
+        with _HANDOFF_OWNER_LOCK, self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             if guard:
                 guard(db)
+            if prepare:
+                changes_by_id, successor = prepare(db)
             for request_id, changes in changes_by_id.items():
                 row = db.execute("SELECT record FROM requests WHERE id=?", (request_id,)).fetchone()
                 record = {**json.loads(row[0]), **changes, "updated_at": time.time()}
                 db.execute("UPDATE requests SET record=? WHERE id=?", (json.dumps(record), request_id))
                 updated[request_id] = record
+            if successor is not None:
+                self._enqueue(db, successor)
             if guard:
                 guard(db)
         return updated
@@ -228,7 +237,7 @@ class HandoffService:
             result.update(document=record["document"], target_endpoint=record["target_endpoint"])
             result.update({k: record[k] for k in ("outcome", "parent_request_id", "root_request_id",
                                                  "continuation_confirmed", "producer_admission_id",
-                                                 "request_first_tool", "origin_first_tool") if k in record})
+                                                 "request_first_tool", "origin_first_tool", "next_stage", "stage_after_request_id") if k in record})
         return result
 
     def busy(self, source, key):
@@ -438,3 +447,7 @@ def coordinate_session(request_id, task_id, handoff_path, target, session_id):
 
 def complete_coordination(request_id, outcome, session_id):
     return _bound_request(session_id, coordination=True, completion=True, args=(request_id, outcome))
+
+
+def continue_coordination(request_id, handoff_path, session_id):
+    return _bound_request(session_id, coordination=True, completion="next_stage", args=(request_id, handoff_path))

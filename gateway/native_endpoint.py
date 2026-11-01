@@ -227,6 +227,9 @@ async def verify_current_source(service, key, sid, home, current):
 
 async def native_request(service, key, sid, home, current, coordination, completion, args):
     await verify_current_source(service, key, sid, home, current)
+    if completion == "next_stage":
+        from gateway.coordination_stages import next_stage
+        return await next_stage(service, key, sid, home, *args)
     if completion:
         from gateway.coordination_receipts import complete_turn
         return await complete_turn(service, key, sid, home, *args)

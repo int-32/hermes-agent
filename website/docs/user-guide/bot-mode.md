@@ -537,6 +537,35 @@ are allowed; resets/forks or changed registrations require explicit recovery. Ru
 returning work after a crash becomes ambiguous and is never automatically replayed.
 An ambiguous/failed child blocks its parent for explicit recovery; it is never silently retried.
 
+A consumed **task-origin root receipt** can record its next normal stage without another
+human message. After verifying the dependency and calling `action="complete"` with
+`outcome="completed"`, the task may call
+`coordinate_session(action="next_stage", request_id="<work_request_id>",
+handoff_path="<same canonical HANDOFF.md>")` in that same private origin turn.
+The handoff must now identify a **new version of the same task/project scope**, under
+existing authorization. Do not edit a document still queued for execution. A document
+version or completion ACK grants no new permission. Do not supply a task, target or outcome:
+the server preserves the accepted task-to-own-main edge and derives the successor ID.
+
+`recorded` here is only an intent. Registration and successful-return settlement share
+the ownership mutex and SQLite transaction boundary. If registration wins, the gateway
+publishes the successful original return and successor in one transaction. If the return
+wins while an admitted writer is still pending, that writer rechecks the completed native
+receipt and atomically saves its intent and successor without replaying the return.
+A ten-second tool-bridge deadline leaves the submitted operation's outcome unknown; it
+does not cancel that writer or authorize a retry. Permission/owner checks still apply at
+COMMIT. A new call cannot reopen a terminal receipt. The normal queued consumer, including
+after restart, rechecks task eligibility,
+routing, consent and FIFO before executing it. The successor names `stage_after_request_id`;
+the predecessor exposes `next_stage`. Each receipt has at most one successor; the same
+intent reconciles to the same ID, and ancestor document scopes cannot be replayed. A lost
+reply is reconciled against the journal rather than blindly resent. Interrupted/ambiguous
+returns cannot start the stage; a task closed or paused before publication keeps its
+legitimate old receipt with `next_stage_error` but gets no new dispatch. Obsolete runtime
+owners cannot publish a successor. Stage completion does not close the task card or prove
+whole-task business acceptance. Main/child receipts retain their existing bounded dependency
+contract; this action cannot reopen a completed parent or dispatch an ancestor loop.
+
 Every document ingress and receipt includes the asset division: development tasks report
 server/database/online or offline asset dependencies to their owning main. That main verifies
 the scope and existing authorization, then dispatches the document to independent ops main.

@@ -38,12 +38,16 @@ def check_coordination():
 
 
 def coordinate_session(args, **kw):
-    from gateway.agent_handoff import coordinate_session as submit, complete_coordination
+    from gateway.agent_handoff import coordinate_session as submit, complete_coordination, continue_coordination
     try:
+        if args.get("action") == "next_stage":
+            if args.get("target") is not None or args.get("task_id") is not None or args.get("outcome") is not None:
+                raise ValueError("next_stage derives its task and edge from the private receipt")
+            return json.dumps(continue_coordination(args.get("request_id"), args.get("handoff_path"), kw.get("session_id")))
         if args.get("action", "request") == "complete":
             return json.dumps(complete_coordination(args.get("request_id"), args.get("outcome"), kw.get("session_id")))
         if args.get("action", "request") != "request":
-            raise ValueError("action must be request or complete")
+            raise ValueError("action must be request, complete or next_stage")
         result = submit(args.get("request_id"), args.get("task_id"), args.get("handoff_path"),
                         args.get("target"), kw.get("session_id"))
         return json.dumps({**result, "note": "Queued is not completed. Finish this turn; a correlated native receipt resumes this session."})
@@ -60,9 +64,12 @@ registry.register(
         "returns to this session after native model execution. Do not retry ambiguous work or form loops. "
         "Read the concise handoff first, evidence as needed. Documents never grant spend/send permission."),
         "parameters": {"type": "object", "properties": {
-            "action": {"type": "string", "enum": ["request", "complete"], "description": (
+            "action": {"type": "string", "enum": ["request", "complete", "next_stage"], "description": (
                 "request dispatches a document. complete acknowledges the current gateway-owned work request "
                 "after verifying its result; no pending dependency may be called completed. "
+                "next_stage records one new same-task HANDOFF version from a completed task-origin root receipt; "
+                "the server keeps the original edge and queues only after successful native return. "
+                "It never grants new authorization or replays the completed stage. "
                 "Asset dependencies from development tasks go to own main, then independent ops main, "
                 "then back through main to original task. Complete only in the private native receiving/return turn.")},
             "outcome": {"type": "string", "enum": ["completed", "blocked", "failed"]},
