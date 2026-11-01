@@ -45,6 +45,11 @@ writer, task list, timer, dispatch loop or new database here.
 - Every database named by the previous observation must be read successfully.
   A missing/unreadable previous database is `previous_board_unavailable`, exit 2,
   not removal of its tasks; that coverage error persists if its output is reused.
+  One finalization step performs this comparison after every collection path,
+  including early inventory errors and later board/worker errors. It derives
+  expected sources from the existing snapshot and coverage errors, with no other
+  source list. A successfully reread source clears its coverage error; unrelated
+  errors are not carried forward as permanent failures.
   Only a successfully read database can produce per-task removals. After recovery,
   compare against the last successfully examined baseline.
 - `done`/`archived` cards and stopped HWB observations remain visible. Age,

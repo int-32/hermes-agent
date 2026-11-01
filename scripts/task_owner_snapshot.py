@@ -69,6 +69,7 @@ def task_index(snapshot):
 
 
 def check_board_coverage(previous, result):
+    """Finalize coverage and removals even when collection exited through an error."""
     observed = {board["database"] for board in result["boards"]}
     expected = {board["database"] for board in previous.get("boards", [])}
     # An error output is not a healthy baseline, even if supplied again by a caller.
@@ -76,7 +77,8 @@ def check_board_coverage(previous, result):
                     if item.get("reason") == "previous_board_unavailable")
     for database in sorted(expected - observed):
         error(result, database, ValueError("previous_board_unavailable"))
-    return observed
+    removed = set(task_index(previous)) - set(task_index(result))
+    result["delta"]["removed_tasks"] = [dict(database=db, id=tid) for db, tid in sorted(removed) if db in observed]
 
 
 def directories(root):
@@ -275,15 +277,15 @@ def collect(home, previous=None, *, now=None):
                     error(result, path, exc)
         if not seen:
             error(result, home, FileNotFoundError())
-        observed_databases = check_board_coverage(previous, result)
         collect_workers(home, previous, result, now)
         unread = {item["source"] for item in result["errors"]}
-        result["delta"]["removed_tasks"] = [dict(database=db, id=tid) for db, tid in sorted(set(old_tasks) - set(task_index(result))) if db in observed_databases]
         current_workers = {item["id"] for item in result["executors"]}
         result["delta"]["removed_executors"] = sorted(item["id"] for item in previous.get("executors", [])
             if item["id"] not in current_workers and str(home / "workers" / item["id"] / "meta.json") not in unread)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         error(result, home, exc)
+    finally:
+        check_board_coverage(previous, result)
     deadline = previous.get("next_review_at", now)
     observed = previous.get("observed_at", now)
     if (not isinstance(deadline, (int, float)) or not math.isfinite(deadline)

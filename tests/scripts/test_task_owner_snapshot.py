@@ -458,3 +458,191 @@ def test_turn_dedup_limit_requires_reconciliation_without_advancing_cursor(home)
     assert overflow["executors"][0]["event_cursor"] == first["executors"][0]["event_cursor"]
     assert overflow["executors"][0]["turn_completion_keys"] == first["executors"][0]["turn_completion_keys"]
     assert overflow["delta"]["executors"][0]["completions"] == []
+
+
+# Original successor-review fixtures and behaviour assertions, unchanged.
+def append(root, events):
+    with (root / 'events.jsonl').open('a', encoding='utf-8') as f:
+        for e in events:
+            f.write(json.dumps(e) + '\n')
+
+
+
+def test_empty_previous_source_is_still_required(home):
+    other = home / 'kanban/boards/other'
+    other.mkdir(parents=True)
+    with sqlite3.connect(other / 'kanban.db') as db:
+        db.execute('CREATE TABLE tasks(id TEXT,status TEXT)')
+    _, baseline = scan(home)
+    (other / 'kanban.db').rename(other / 'away.db')
+    code, missing = scan(home, baseline, 1001)
+    assert code == 2 and any(e['source'] == str(other / 'kanban.db') and e['reason'] == 'previous_board_unavailable' for e in missing['errors'])
+    code, repeated = scan(home, missing, 1002)
+    assert code == 2 and repeated['delta']['removed_tasks'] == []
+    (other / 'away.db').rename(other / 'kanban.db')
+    code, recovered = scan(home, baseline, 1003)
+    assert code == 0 and recovered['errors'] == [] and recovered['delta']['removed_tasks'] == []
+
+
+
+def test_corrupt_source_error_baseline_cannot_shed_coverage(home):
+    other = home / 'kanban/boards/other'
+    other.mkdir(parents=True)
+    with sqlite3.connect(other / 'kanban.db') as db:
+        db.execute('CREATE TABLE tasks(id TEXT,status TEXT)')
+    _, baseline = scan(home)
+    (home / 'kanban.db').write_bytes(b'broken')
+    code, error = scan(home, baseline, 1001)
+    assert code == 2 and any(e['reason'] == 'previous_board_unavailable' for e in error['errors'])
+    code, again = scan(home, error, 1002)
+    assert code == 2 and again['delta']['removed_tasks'] == []
+
+
+
+@pytest.mark.platforms('posix')
+def test_inventory_failure_does_not_erase_required_sources_on_error_baseline_reuse(home):
+    other = home / 'kanban/boards/other'
+    other.mkdir(parents=True)
+    with sqlite3.connect(other / 'kanban.db') as db:
+        db.executescript("CREATE TABLE tasks(id TEXT,status TEXT);INSERT INTO tasks VALUES('other','running')")
+    profiles = home / 'profiles'
+    profiles.mkdir()
+    _, baseline = scan(home)
+    assert len(baseline['boards']) == 2
+    (home / 'kanban.db').rename(home / 'unavailable.db')
+    profiles.chmod(0)
+    try:
+        code, error = scan(home, baseline, 1001)
+        assert code == 2 and error['errors']
+    finally:
+        profiles.chmod(0o700)
+    code, again = scan(home, error, 1002)
+    # Same deliberate wrong-baseline resilience claimed by R1, but with an
+    # earlier inventory exception before check_board_coverage is reached.
+    observation = {'first_errors': error['errors'], 'first_boards': error['boards'],
+                   'next_exit': code, 'next_errors': again['errors'],
+                   'next_boards': [b['database'] for b in again['boards']],
+                   'next_removed_tasks': again['delta']['removed_tasks'], 'next_reasons': again['reasons']}
+    print(json.dumps(observation, sort_keys=True))
+    assert code == 2 and any(e['source'] == str(home / 'kanban.db') and e['reason'] == 'previous_board_unavailable' for e in again['errors']), observation
+
+
+
+def test_64_keys_allow_repeat_and_reset_on_new_turn(home):
+    dones = [{'kind': 'turn_done', 'text': str(i)} for i in range(64)]
+    root = worker(home, events=[{'kind': 'turn_start'}] + dones)
+    code, baseline = scan(home)
+    assert code == 0 and len(baseline['executors'][0]['turn_completion_keys']) == 64
+    append(root, [dones[0]])
+    code, repeat = scan(home, baseline, 1001)
+    assert code == 0 and repeat['delta']['executors'][0]['completions'] == []
+    assert repeat['delta']['executors'][0]['omitted_completions'] == 0
+    append(root, [{'kind': 'turn_start'}, dones[0]])
+    code, reset = scan(home, repeat, 1002)
+    assert code == 0 and len(reset['executors'][0]['turn_completion_keys']) == 1
+    assert len(reset['delta']['executors'][0]['completions']) == 1
+    assert reset['executors'][0]['turn_key'] != baseline['executors'][0]['turn_key']
+
+
+
+@pytest.mark.parametrize('fault', ['partial', 'malformed', 'overflow'])
+def test_read_failure_rolls_back_all_dedup_state_and_retries(home, fault):
+    dones = [{'kind': 'turn_done', 'text': str(i)} for i in range(64 if fault == 'overflow' else 2)]
+    root = worker(home, events=[{'kind': 'turn_start'}] + dones)
+    code, baseline = scan(home)
+    assert code == 0
+    old = baseline['executors'][0]
+    path = root / 'events.jsonl'
+    raw = path.read_bytes()
+    if fault == 'overflow':
+        append(root, [{'kind': 'turn_done', 'text': '65th'}])
+    else:
+        append(root, [{'kind': 'turn_start'}, {'kind': 'turn_done', 'text': 'tentative'}])
+        with path.open('ab') as f:
+            f.write(b'{"kind":"turn_done"' if fault == 'partial' else b'{bad}\n')
+    code, error = scan(home, baseline, 1001)
+    assert code == 2 and error['errors'] and error['wakeAgent']
+    current = error['executors'][0]
+    for key in ('event_cursor', 'turn_key', 'turn_completion_keys', 'last_completion'):
+        assert current[key] == old[key], key
+    assert current['result_state'] == 'UNVERIFIED'
+    assert error['delta']['executors'][0]['completions'] == []
+    # Restore only unread suffix; the retained complete-line cursor/anchor is valid.
+    with path.open('r+b') as f:
+        f.truncate(len(raw))
+    append(root, [{'kind': 'turn_start'}, {'kind': 'turn_done', 'text': 'recovered'}])
+    code, recovered = scan(home, error, 1002)
+    assert code == 0 and len(recovered['executors'][0]['turn_completion_keys']) == 1
+    assert recovered['delta']['executors'][0]['completions'][0]['summary'] == 'recovered'
+
+
+
+def test_legacy_snapshot_seeds_last_ended_completion(home):
+    done = {'kind': 'turn_done', 'text': 'same'}
+    root = worker(home, events=[{'kind': 'turn_start'}, done])
+    _, baseline = scan(home)
+    baseline['executors'][0].pop('turn_completion_keys')
+    append(root, [done])
+    code, repeat = scan(home, baseline, 1001)
+    assert code == 0 and repeat['delta']['executors'][0]['completions'] == []
+    assert len(repeat['executors'][0]['turn_completion_keys']) == 1
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("fault", ["home", "boards_inventory", "later_profile_inventory", "board_stat",
+                                  "board_read", "worker_inventory", "worker_meta", "worker_events"])
+def test_coverage_finalization_survives_all_collection_error_paths(home, fault):
+    other = home / "kanban/boards/other"
+    other.mkdir(parents=True)
+    peer = home / "profiles/peer"
+    (peer / "kanban/boards").mkdir(parents=True)
+    for database in (other / "kanban.db", peer / "kanban.db"):
+        with sqlite3.connect(database) as db:
+            db.executescript("CREATE TABLE tasks(id TEXT,status TEXT);INSERT INTO tasks VALUES('other','running')")
+    root = worker(home)
+    code, baseline = scan(home)
+    assert code == 0 and len(baseline["boards"]) == 3
+    known = {board["database"] for board in baseline["boards"]}
+    (home / "kanban.db").rename(home / "unavailable.db")
+    restricted = {"boards_inventory": home / "kanban/boards", "later_profile_inventory": peer / "kanban/boards",
+                  "worker_inventory": home / "workers"}.get(fault)
+    path = {"board_read": other / "kanban.db", "worker_meta": root / "meta.json",
+            "worker_events": root / "events.jsonl"}.get(fault)
+    rewritten = (path, path.read_bytes()) if path else None
+    moved_home = home.parent / "unavailable-home"
+    if fault == "home":
+        home.rename(moved_home)
+    if fault == "board_stat":
+        (other / "kanban.db").rename(other / "saved.db")
+        (other / "kanban.db").symlink_to("kanban.db")
+    if restricted:
+        restricted.chmod(0)
+    if rewritten:
+        rewritten[0].write_bytes(b"{bad}\n")
+    try:
+        code, current = scan(home, baseline, 1001)
+        assert code == 2 and current["errors"] and current["wakeAgent"]
+        observed = {board["database"] for board in current["boards"]}
+        unknown = {row["source"] for row in current["errors"] if row["reason"] == "previous_board_unavailable"}
+        assert observed | unknown == known
+        assert current["delta"]["removed_tasks"] == []
+    finally:
+        if restricted:
+            restricted.chmod(0o700)
+        if rewritten:
+            rewritten[0].write_bytes(rewritten[1])
+        if fault == "home":
+            moved_home.rename(home)
+        if fault == "board_stat":
+            (other / "kanban.db").unlink()
+            (other / "saved.db").rename(other / "kanban.db")
+    for now in (1002, 1003):
+        code, current = scan(home, current, now)
+        assert code == 2 and current["wakeAgent"] and current["delta"]["removed_tasks"] == []
+        assert {row["source"] for row in current["errors"] if row["reason"] == "previous_board_unavailable"} == {str(home / "kanban.db")}
+    assert scan(home, baseline, 1004)[0] == 2
+    (home / "unavailable.db").rename(home / "kanban.db")
+    code, recovered = scan(home, current, 1005)
+    assert code == 0 and recovered["errors"] == [] and recovered["delta"]["removed_tasks"] == []
+    code, stable = scan(home, recovered, 1006)
+    assert code == 0 and stable["wakeAgent"] is False
