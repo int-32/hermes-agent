@@ -23,6 +23,7 @@ class DocumentTurn:
     phase: str
     child: dict | None = None
     completion: str | None = None
+    stage_owner: object = None
 
 
 DOCUMENT_TURN = ContextVar("native_document_turn", default=None)
@@ -151,6 +152,10 @@ def continuation_prompt(record, work, phase):
               "original work. Do not forward queued/delegated as a business result. "
               "When finished call coordinate_session action=complete with work_request_id and an explicit "
               "outcome completed/blocked/failed, then give your final result including root_request_id. "
+              "For a task-origin root receipt only: after consuming and completing this stage, "
+              "use action=next_stage with work_request_id and handoff_path to a new same-task HANDOFF "
+              "version if existing authorization requires another stage. The server queues it only after "
+              "this native final returns successfully. Stage completion is not whole-task completion. "
               "Do not manually send a duplicate reply or open an ancestor dispatch.\n"
             + json.dumps(record["response"], ensure_ascii=False))
 
@@ -166,6 +171,8 @@ async def resume_source(service, record, source):
     policy = record_policy(service, record)
     _, sid = await native_endpoint(service, policy, record["source_endpoint"], accepted_sid=record["source_sid"])
     turn = DocumentTurn(work, record["source_key"], sid, "continuation" if parent_id else "origin", record)
+    from gateway.coordination_stages import return_owner
+    turn.stage_owner = return_owner(service)
     await asyncio.to_thread(service.journal.update, record["request_id"], status="returning")
     # Use the parent's outward path on a correlated return, not the child's completed hop.
     returned = {**record, "lineage": work["lineage"] if parent_id else [record["source_key"]],
@@ -199,7 +206,8 @@ async def resume_source(service, record, source):
         "outcome": record["outcome"] if parent_id else turn.completion or "blocked"}
     if not parent_id and turn.completion is None:
         updates[record["request_id"]]["error"] = "missing explicit continuation completion"
-    await asyncio.to_thread(service.journal.update_many, updates)
+    from gateway.coordination_stages import settle_return
+    await settle_return(service, record, turn, updates)
 
 
 async def tick_document(service, record, source, target):
