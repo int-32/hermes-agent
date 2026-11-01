@@ -19,11 +19,14 @@ python scripts/task_owner_snapshot.py --home /absolute/isolated/home --checkpoin
 `consumed_fingerprints.snapshot_path`. Neither input is written. `--now`
 overrides the clock in offline replays. Invalid CLI arguments exit 2 on stderr.
 
-Stdout is one JSON object: original board/worker fingerprints plus `delta`,
+Stdout is one ASCII-escaped JSON object: original board/worker fingerprints plus `delta`,
 `errors`, `reasons`, `wakeAgent`, `observed_at`, and `next_review_at`.
 Exit 0 means collection succeeded, **not** task success or delivery.
 Exit 2 with `read_error` means collection/checkpoint/coverage could not be
 established. Do not promote that output as a consumed baseline.
+Unicode text is preserved after JSON decoding; ASCII escaping keeps Unicode line
+separators inside JSON strings compatible with the existing cron last-line gate.
+Fingerprint serialization is unchanged.
 
 The full object is machine observation evidence; only its `delta`, reasons,
 coverage and gate belong in a model prompt. Keep snapshot files under the
@@ -39,6 +42,11 @@ writer, task list, timer, dispatch loop or new database here.
   comment/event tables, maximum 240 characters per selected field. Inventory
   and full-history fingerprints are still read to detect changes/deletions;
   SQLite may scan/sort history. This is a context bound, not a CPU-time bound.
+- Every database named by the previous observation must be read successfully.
+  A missing/unreadable previous database is `previous_board_unavailable`, exit 2,
+  not removal of its tasks; that coverage error persists if its output is reused.
+  Only a successfully read database can produce per-task removals. After recovery,
+  compare against the last successfully examined baseline.
 - `done`/`archived` cards and stopped HWB observations remain visible. Age,
   idle status and absent logs never decide blockage or acceptance.
 - Per worker, read at most 64 KiB from the previous complete-line cursor,
@@ -51,10 +59,16 @@ writer, task list, timer, dispatch loop or new database here.
   streams produce errors. The saved cursor is not advanced on a failed read.
   Complete a partial append and retry the same baseline; on log replacement
   the original owner must reconcile generations before choosing a new baseline.
-- Completion keys combine the observed turn start and completion content.
-  An identical repeated completion in the same turn is suppressed. With a
-  lost checkpoint, observations can repeat; this collector has no side effects
-  and claims no exactly-once delivery guarantee.
+- Completion keys combine the observed turn start and completion content. The
+  existing worker observation retains at most 64 distinct keys for its current
+  turn, resetting on `turn_start`. Within that window, adjacent and nonadjacent
+  identical completions are suppressed, including across observation cursors.
+  A 65th distinct completion without a new start is `completion_window_exceeded`,
+  exit 2: retain the prior cursor/keys and let the original owner reconcile.
+  Old snapshots without this field can seed only the last completion of an ended turn;
+  older nonadjacent repeats and lost-checkpoint history require reconciliation.
+  This is bounded observation memory, not a permanent deduplication/ACK ledger;
+  it provides no exactly-once consumption or delivery guarantee.
 
 `turn_done` proves only a worker execution boundary, including failed or
 interrupted turns. Each completion explicitly reports owner consumption and

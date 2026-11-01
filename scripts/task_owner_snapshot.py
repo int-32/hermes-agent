@@ -18,10 +18,11 @@ import time
 SCHEMA = "task-owner-observation/v1"
 EVENT_BYTES = 65536
 REVIEW_SECONDS = 1800
+TURN_COMPLETION_LIMIT = 64
 
 
-def encoded(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+def encoded(value, *, ensure_ascii=False):
+    return json.dumps(value, ensure_ascii=ensure_ascii, sort_keys=True, default=str, separators=(",", ":"))
 
 
 def digest(value):
@@ -31,7 +32,8 @@ def digest(value):
 def error(result, source, exc):
     # Exception text can contain task data or SQL values.
     known = {"unsupported_checkpoint_schema", "unsupported_snapshot_schema", "unsupported_board_schema",
-             "event_stream_changed", "partial_event", "unsupported_event", "worker_id_mismatch"}
+             "event_stream_changed", "partial_event", "unsupported_event", "worker_id_mismatch",
+             "previous_board_unavailable", "completion_window_exceeded"}
     reason = str(exc) if type(exc) is ValueError and str(exc) in known else type(exc).__name__
     result["errors"].append({"source": str(source), "error": type(exc).__name__, "reason": reason})
 
@@ -64,6 +66,17 @@ def load_previous(previous=None, checkpoint=None):
 def task_index(snapshot):
     return {(board["database"], task["id"]): task
             for board in snapshot.get("boards", []) for task in board["tasks"]}
+
+
+def check_board_coverage(previous, result):
+    observed = {board["database"] for board in result["boards"]}
+    expected = {board["database"] for board in previous.get("boards", [])}
+    # An error output is not a healthy baseline, even if supplied again by a caller.
+    expected.update(item["source"] for item in previous.get("errors", [])
+                    if item.get("reason") == "previous_board_unavailable")
+    for database in sorted(expected - observed):
+        error(result, database, ValueError("previous_board_unavailable"))
+    return observed
 
 
 def directories(root):
@@ -157,6 +170,12 @@ def collect_events(path, old, item):
             raise ValueError("event_stream_changed")
         item.update(last_completion=old.get("last_completion"), turn_key=old.get("turn_key"),
                     result_state=old.get("result_state", "UNVERIFIED"))
+        keys = old.get("turn_completion_keys")
+        if keys is None:
+            keys = [old["last_completion"]["key"]] if old.get("last_completion") and old.get("result_state") == "execution_ended" else []
+        if not isinstance(keys, list) or len(keys) > TURN_COMPLETION_LIMIT:
+            raise ValueError("completion_window_exceeded")
+        keys = set(keys)
         stream.seek(offset)
         raw = stream.read(min(EVENT_BYTES, stat.st_size - offset))
         complete = raw[:raw.rfind(b"\n") + 1]
@@ -167,13 +186,18 @@ def collect_events(path, old, item):
                 raise ValueError("unsupported_event")
             if event["kind"] == "turn_start":
                 item.update(turn_key=digest([identity, position]), result_state="executing")
+                keys.clear()
             elif event["kind"] == "turn_done":
                 done = completion(event, item["turn_key"], str(path) + "#byte=" + str(position))
-                if done["key"] != (item.get("last_completion") or {}).get("key"):
+                if done["key"] not in keys:
+                    if len(keys) >= TURN_COMPLETION_LIMIT:
+                        raise ValueError("completion_window_exceeded")
                     completions.append(done)
+                    keys.add(done["key"])
                 item.update(last_completion=done, result_state="execution_ended")
             position += len(line)
         item["event_cursor"] = {"identity": identity, "offset": position, "anchor": anchor(stream, position)}
+        item["turn_completion_keys"] = sorted(keys)
         item["has_more"] = position < stat.st_size
         item["event_size"] = stat.st_size
         after = fstat(stream.fileno())
@@ -208,6 +232,7 @@ def collect_workers(home, previous, result, now):
                     raise FileNotFoundError("previous event stream missing")
             except (OSError, ValueError, TypeError) as exc:
                 item.update(event_cursor=old.get("event_cursor"), last_completion=old.get("last_completion"),
+                            turn_key=old.get("turn_key"), turn_completion_keys=old.get("turn_completion_keys"),
                             result_state="UNVERIFIED", event_read_error=True)
                 error(result, events, exc)
             stamp = events.stat().st_mtime if events.exists() else path.stat().st_mtime
@@ -250,9 +275,10 @@ def collect(home, previous=None, *, now=None):
                     error(result, path, exc)
         if not seen:
             error(result, home, FileNotFoundError())
+        observed_databases = check_board_coverage(previous, result)
         collect_workers(home, previous, result, now)
         unread = {item["source"] for item in result["errors"]}
-        result["delta"]["removed_tasks"] = [dict(database=db, id=tid) for db, tid in sorted(set(old_tasks) - set(task_index(result))) if db not in unread]
+        result["delta"]["removed_tasks"] = [dict(database=db, id=tid) for db, tid in sorted(set(old_tasks) - set(task_index(result))) if db in observed_databases]
         current_workers = {item["id"] for item in result["executors"]}
         result["delta"]["removed_executors"] = sorted(item["id"] for item in previous.get("executors", [])
             if item["id"] not in current_workers and str(home / "workers" / item["id"] / "meta.json") not in unread)
@@ -299,7 +325,8 @@ def main():
         result.update(wakeAgent=True, reasons=sorted(set(result["reasons"] + ["read_error"])))
     else:
         result = collect(args.home, previous, now=args.now)
-    print(encoded(result))
+    # The cron gate uses str.splitlines(), including U+0085/U+2028 as boundaries.
+    print(encoded(result, ensure_ascii=True))
     return 2 if result["errors"] else 0
 
 
