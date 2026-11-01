@@ -211,3 +211,53 @@ single-job paused/drained switch remain separately reviewed operations; nothing
 in rendering a package installs files or edits a job. The existing 1800-second
 review deadline remains, so an unchanged 30-minute natural fire may still wake
 for `review_due`.
+
+
+## Read-only evidence verification
+
+Use the maintained verifier on the existing cached prerun JSON, without firing
+another collector or querying a job:
+
+```sh
+python scripts/task_owner_verify.py --projection /absolute/cached-projection.json --checkpoint /absolute/original-v2.json
+```
+
+`--projection -` accepts that same JSON on stdin. All file arguments and the
+artifact/v2 reference paths must be absolute. The verifier reads, in order, the
+projection, the artifact's actual bytes (checking declared size and SHA256 before
+JSON parsing), the original v2 checkpoint, and its consumed snapshot. It reuses
+one call-local byte/JSON cache by file identity, including symlink/hardlink aliases.
+It does not scan a home or read databases, worker logs, jobs or configuration.
+Only stdout is emitted; no artifact, checkpoint, ACK or other state is written.
+
+The current complete observation's required fields and nested shapes are checked
+against the existing producer. Its projection is recomputed with the collector's
+own bounded projection function. Comparison supports the actual cron order:
+`_run_job_script` redacts stdout before caching/prompt injection. Both projections
+are normalized with the same redactor in forced mode (no config read); artifact
+path, bytes and SHA256 must still match the unredacted file exactly. Output never
+contains the full task/worker text. The baseline follows the existing v2 consumer's
+reference/deadline compatibility, including its ISO `observed_at` plus 1800s fallback;
+a missing baseline `errors` field or timezone remains an explicit unknown.
+
+Exit 0 means **evidence ready for owner processing**, not that it was processed.
+Exit 2 rejects invalid/unreadable/missing/changed evidence, identity/schema/reference
+mismatch or invalid arguments. Exit 3 reports verified evidence requiring
+reconciliation: observation/baseline errors, missing baseline health/timezone,
+projected omissions, completion omissions, event backlog/read errors or explicit
+incompleteness. A nonzero collector/prerun result remains a separate blocker;
+verifying a supplied JSON file cannot attest that execution's success. An unchanged
+false gate still skips Agent work and never advances the checkpoint.
+
+Each regular input is capped at 64 MiB; the projection and single ASCII JSON stdout
+report are capped at 16 KiB. Oversized input is rejected, never silently truncated.
+Oversized report paths are explicitly omitted and the result becomes non-ready.
+Reports include verified evidence pointers, bounded counts/issues and same-file
+versus distinct baseline relation; `consumption` and `native_ack` always remain
+`UNVERIFIED`, and `checkpoint_written` is false. The existing observation format
+has no binding to the K used during collection, so the report explicitly retains
+`collection_baseline_binding=UNVERIFIED_NOT_IN_OBSERVATION_FORMAT`. Identity checks
+do not establish source inventory truth, trusted owner acceptance, native request
+association or permission to promote a candidate. Reuse this result for mechanical
+checks; full business reconciliation remains the original Agent's responsibility.
+This CLI adds no K writer and changes no accepted prompt/package or cron consumer.
