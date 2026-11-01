@@ -127,12 +127,16 @@ class HandoffJournal:
     def update(self, request_id, **changes):
         return self.update_many({request_id: changes})[request_id]
 
-    def update_many(self, changes_by_id, *, guard=None, successor=None):
+    def update_many(self, changes_by_id, *, guard=None, successor=None, prepare=None):
         updated = {}
-        with self.connect() as db:
+        # Decide stage association under the same ownership/SQLite boundary as COMMIT.
+        # In particular, a bridge deadline does not stop a previously submitted writer.
+        with _HANDOFF_OWNER_LOCK, self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             if guard:
                 guard(db)
+            if prepare:
+                changes_by_id, successor = prepare(db)
             for request_id, changes in changes_by_id.items():
                 row = db.execute("SELECT record FROM requests WHERE id=?", (request_id,)).fetchone()
                 record = {**json.loads(row[0]), **changes, "updated_at": time.time()}

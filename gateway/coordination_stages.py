@@ -88,34 +88,77 @@ async def _durable_call(function, *args):
         raise
 
 
+def _root_return(current):
+    if (current.get('parent_request_id')
+            or not any(a['phase'] == 'origin' and a['outcome'] == 'completed'
+                       for a in current.get('acknowledgements', []))):
+        raise PermissionError('stage requires the current completed root return')
+
+
+def _transaction_record(db, request_id):
+    row = db.execute('SELECT record FROM requests WHERE id=?', (request_id,)).fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def _admit_stage(service, turn):
+    from gateway.agent_handoff import completion_owner, _HANDOFF_OWNER_LOCK
+    with _HANDOFF_OWNER_LOCK:
+        owner = completion_owner(service)
+        if turn.stage_owner is not owner:
+            raise PermissionError('private receipt belongs to an obsolete stage owner')
+        current = service.journal.get(turn.work['request_id'])
+        _root_return(current)
+        if current['status'] != 'returning':
+            raise PermissionError('stage requires the current completed root return')
+        return owner
+
+
 def _write_intent(service, turn, owner, intent):
     from gateway.agent_handoff import completion_owner, _HANDOFF_OWNER_LOCK
+    request_id = turn.work['request_id']
+    candidate = _candidate(turn.work, intent)
     def guard(db=None):
         if completion_owner(service) is not owner or turn.stage_owner is not owner:
             raise PermissionError('stage runtime owner changed')
-        _eligible(service, turn.work)
-    with _HANDOFF_OWNER_LOCK:
-        guard()
-        current = service.journal.get(turn.work['request_id'])
-        if (current['status'] != 'returning' or current.get('parent_request_id')
-                or not any(a['phase'] == 'origin' and a['outcome'] == 'completed'
-                           for a in current.get('acknowledgements', []))):
-            raise PermissionError('stage requires the current completed root return')
+        _eligible(service, candidate)
+        # Returning only registers an intent; the ordinary publisher checks its scope.
+        # A late writer publishes here, so it must perform that check at this COMMIT.
+        if db is not None and _transaction_record(db, request_id).get('status') == 'delivered':
+            if document_pointer(coordination_policy(service), intent['document']['task_id'],
+                                intent['document']['path']) != intent['document']:
+                raise PermissionError('stage document changed before publication')
+    # Do not hold the owner mutex while waiting to ENTER update_many. A timed-out
+    # bridge's already-admitted writer may arrive after the native return commits.
+    def prepare(db):
+        current = _transaction_record(db, request_id)
+        _root_return(current)
         if current.get('next_stage') not in (None, intent):
             raise PermissionError('receipt already has a different next scope')
-        if current.get('next_stage') is None:
-            try:
-                service.journal.update_many({current['request_id']: {'next_stage': intent}}, guard=guard)
-            except (OSError, sqlite3.Error):
-                # A lost reply is not evidence that COMMIT failed. Read before any retry.
-                guard()
-                saved = service.journal.get(current['request_id'])
-                if saved.get('next_stage') != intent or saved['status'] != 'returning':
-                    raise
+        if current['status'] == 'returning':
+            successor = None
+        elif (current['status'] == 'delivered' and current.get('continuation_confirmed') is True
+              and current.get('continuation_outcome') == current.get('outcome') == 'completed'):
+            # The SAME admitted writer, not a replay of a terminal receipt. Persist
+            # both rows together so restart's ordinary queued consumer can find it.
+            successor = candidate
+        else:
+            raise PermissionError('stage requires the current completed root return')
+        return {request_id: {'next_stage': intent}}, successor
+    try:
+        service.journal.update_many({request_id: {'next_stage': intent}}, guard=guard, prepare=prepare)
+    except (OSError, sqlite3.Error):
+        # Lost COMMIT reply: inspect both rows before treating the write as failed.
+        with _HANDOFF_OWNER_LOCK:
+            guard()
+            saved = service.journal.get(request_id)
+            successor = service.journal.get(intent['request_id'])
+            if (saved.get('next_stage') != intent or saved['status'] not in {'returning', 'delivered'}
+                    or (saved['status'] == 'delivered' and (not successor
+                        or any(successor.get(k) != v for k, v in candidate.items() if k != 'status')))):
+                raise
 
 
 async def next_stage(service, key, sid, home, request_id, path):
-    from gateway.agent_handoff import completion_owner, _HANDOFF_OWNER_LOCK
     from gateway.native_job import PrivateJob, current_job
     async with service.coordination_lock:
         job = current_job()
@@ -125,10 +168,7 @@ async def next_stage(service, key, sid, home, request_id, path):
                 or turn.work.get('parent_request_id') or not turn.work.get('task_binding') or not turn.child
                 or turn.child.get('outcome') != 'completed'):
             raise PermissionError('next_stage requires a consumed completed private task-origin root receipt')
-        with _HANDOFF_OWNER_LOCK:
-            owner = completion_owner(service)
-            if turn.stage_owner is not owner:
-                raise PermissionError('private receipt belongs to an obsolete stage owner')
+        owner = await asyncio.to_thread(_admit_stage, service, turn)
         work = turn.work
         policy = await asyncio.to_thread(coordination_policy, service)
         document = await asyncio.to_thread(document_pointer, policy, work['document']['task_id'], path)
@@ -180,16 +220,42 @@ def _publish(service, turn, changes, candidate, validation_error):
                 raise
 
 
-async def settle_return(service, record, turn, changes):
-    current = await asyncio.to_thread(service.journal.get, record['request_id'])
-    intent = current.get('next_stage')
-    if (not intent or changes[record['request_id']]['status'] != 'delivered'):
-        await asyncio.to_thread(service.journal.update_many, changes)
-        return
-    candidate = _candidate(current, intent)
-    error = None
+def _settle_without_intent(service, request_id, changes):
+    from gateway.agent_handoff import _HANDOFF_OWNER_LOCK
+    def prepare(db):
+        current = _transaction_record(db, request_id)
+        if current.get('next_stage') and changes[request_id]['status'] == 'delivered':
+            return {}, None  # Writer won; caller must validate and publish that intent.
+        return changes, None
     try:
-        await service.pinned_routes(candidate)
-    except (PermissionError, OSError, ValueError) as exc:
-        error = str(exc)
-    await _durable_call(_publish, service, turn, changes, candidate, error)
+        return service.journal.update_many(changes, prepare=prepare)
+    except (OSError, sqlite3.Error):
+        with _HANDOFF_OWNER_LOCK:
+            saved = {key: service.journal.get(key) for key in changes}
+            if all(row and all(row.get(k) == v for k, v in changes[key].items())
+                   for key, row in saved.items()):
+                return saved
+            current = saved[request_id]
+            if (current['status'] == 'returning' and current.get('next_stage')
+                    and changes[request_id]['status'] == 'delivered'):
+                return {}  # The intent won, not an uncommitted successful return.
+            raise
+
+
+async def settle_return(service, record, turn, changes):
+    request_id = record['request_id']
+    while True:
+        current = await asyncio.to_thread(service.journal.get, request_id)
+        intent = current.get('next_stage')
+        if not intent or changes[request_id]['status'] != 'delivered':
+            if await _durable_call(_settle_without_intent, service, request_id, changes):
+                return
+            continue
+        candidate = _candidate(current, intent)
+        error = None
+        try:
+            await service.pinned_routes(candidate)
+        except (PermissionError, OSError, ValueError) as exc:
+            error = str(exc)
+        await _durable_call(_publish, service, turn, changes, candidate, error)
+        return

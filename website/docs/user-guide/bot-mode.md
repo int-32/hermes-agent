@@ -547,9 +547,15 @@ existing authorization. Do not edit a document still queued for execution. A doc
 version or completion ACK grants no new permission. Do not supply a task, target or outcome:
 the server preserves the accepted task-to-own-main edge and derives the successor ID.
 
-`recorded` here is only an intent. The gateway publishes the successful original return
-and the successor into the existing journal in one transaction, only after native final
-generation and delivery succeed. The normal queued consumer rechecks task eligibility,
+`recorded` here is only an intent. Registration and successful-return settlement share
+the ownership mutex and SQLite transaction boundary. If registration wins, the gateway
+publishes the successful original return and successor in one transaction. If the return
+wins while an admitted writer is still pending, that writer rechecks the completed native
+receipt and atomically saves its intent and successor without replaying the return.
+A ten-second tool-bridge deadline leaves the submitted operation's outcome unknown; it
+does not cancel that writer or authorize a retry. Permission/owner checks still apply at
+COMMIT. A new call cannot reopen a terminal receipt. The normal queued consumer, including
+after restart, rechecks task eligibility,
 routing, consent and FIFO before executing it. The successor names `stage_after_request_id`;
 the predecessor exposes `next_stage`. Each receipt has at most one successor; the same
 intent reconciles to the same ID, and ancestor document scopes cannot be replayed. A lost

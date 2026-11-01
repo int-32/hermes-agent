@@ -553,3 +553,176 @@ async def test_unknown_native_return_keeps_intent_unpublished_without_replay(sta
     assert stage.service.journal.get(root['next_stage']['request_id']) is None
     await stage.service.tick()
     assert len(stage.calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('order', 'lost_reply'), [('return-first', False), ('intent-first', False), ('return-first', True)])
+async def test_bridge_deadline_serializes_late_intent_and_return_then_restarts_once(stage, monkeypatch, order, lost_reply):
+    import threading
+    journal = stage.service.journal
+    original = journal.update_many
+    intent_entered, release_intent, intent_done = threading.Event(), threading.Event(), threading.Event()
+    return_entered, release_return = threading.Event(), threading.Event()
+    results, observations = [], []
+    def interleave(changes, **kwargs):
+        if any('next_stage' in v for v in changes.values()):
+            intent_entered.set()
+            assert release_intent.wait(25)
+            try:
+                result = original(changes, **kwargs)
+                if lost_reply:
+                    raise TimeoutError('unknown reply after real intent/successor COMMIT')
+                return result
+            finally:
+                intent_done.set()
+        if order == 'intent-first' and any(v.get('status') == 'delivered' for v in changes.values()):
+            return_entered.set()
+            assert release_return.wait(25)
+        return original(changes, **kwargs)
+    monkeypatch.setattr(journal, 'update_many', interleave)
+    async def handle(event):
+        turn = DOCUMENT_TURN.get(); key = event.source.chat_id
+        stage.calls.append((turn.work['request_id'], turn.phase))
+        if turn.phase == 'request':
+            data = stage.path.read_bytes()
+            assert hashlib.sha256(data).hexdigest() == turn.work['document']['sha256']
+            stage.probes.append(data.decode())
+            response = 'handled ' + data.decode()
+        else:
+            stage.responses.append(turn.child['response'])
+            assert turn.child['response'] == 'handled ' + stage.probes[-1]
+            response = 'consumed ' + turn.child['response']
+        ack = await tool(stage, key, {'action': 'complete', 'request_id': turn.work['request_id'],
+            'outcome': 'completed'}, job=event_job(event))
+        assert ack['status'] == 'recorded'
+        if turn.phase == 'origin' and turn.work['request_id'] == 'stage-root-0001':
+            stage.path.write_text('second scope after actual bridge deadline')
+            results.append(await tool(stage, key, {'action': 'next_stage', 'request_id': turn.work['request_id'],
+                'handoff_path': str(stage.path)}, job=event_job(event)))
+        event._gateway_accepted = True
+        capture_internal_response(event, response, successful=True)
+        capture_internal_delivery(event, SendResult(success=True, message_id='final-' + key))
+        finish_internal_receipt(event, ProcessingOutcome.SUCCESS)
+    stage.service.runner.adapter.handle_message = handle
+    rid = await begin(stage)
+    tick = asyncio.create_task(stage.service.tick())
+    try:
+        assert await asyncio.to_thread(intent_entered.wait, 10)
+        if order == 'return-first':
+            await asyncio.wait_for(asyncio.shield(tick), 16)
+            before = journal.get(rid)
+            assert before['status'] == 'delivered' and not before.get('next_stage')
+        else:
+            assert await asyncio.to_thread(return_entered.wait, 16)
+            assert journal.get(rid)['status'] == 'returning'
+        assert results == [{'error': ''}]  # Unchanged real ten-second bound-tool deadline.
+        release_intent.set()
+        assert await asyncio.to_thread(intent_done.wait, 10)
+        # Join the server operation, including reconciliation of an unknown COMMIT reply.
+        async with stage.service.coordination_lock:
+            pass
+        middle = journal.get(rid)
+        nid = middle['next_stage']['request_id']
+        if order == 'intent-first':
+            assert middle['status'] == 'returning' and journal.get(nid) is None
+        else:
+            assert middle['status'] == 'delivered' and journal.get(nid)['status'] == 'queued'
+        observations.append(middle)
+        release_return.set()
+        await asyncio.wait_for(tick, 10)
+        root = journal.get(rid)
+        assert root['status'] == 'delivered' and journal.get(nid)['status'] == 'queued'
+        restarted = handoff.HandoffService(stage.service.runner, stage.service.home, stage.service.policy)
+        handoff._service = restarted; stage.service = restarted; restarted.runner.service = restarted
+        await restarted.tick(); await restarted.tick()
+        assert restarted.journal.get(nid)['status'] == 'delivered'
+        assert len(stage.calls) == 4 and len(set(stage.probes)) == 2
+        assert stage.responses == ['handled ' + value for value in stage.probes]
+        assert len(restarted.journal.children(rid)) == 0  # Successor is a new stage, not an old dependency replay.
+        assert len(observations) == 1
+    finally:
+        release_intent.set(); release_return.set()
+        await asyncio.gather(tick, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('when', ['before-commit', 'after-commit'])
+async def test_cancel_intent_operation_joins_writer_before_successful_return(stage, monkeypatch, when):
+    import threading
+    from gateway import coordination_stages as stages
+    entered, release = threading.Event(), threading.Event()
+    journal = stage.service.journal
+    original_update, original_call = journal.update_many, stages._durable_call
+    operation = []
+    async def capture(function, *args):
+        if function is stages._write_intent:
+            operation.append(asyncio.current_task())
+        return await original_call(function, *args)
+    def barrier(changes, **kwargs):
+        is_intent = any('next_stage' in values for values in changes.values())
+        if is_intent and when == 'before-commit':
+            entered.set(); assert release.wait(20)
+        result = original_update(changes, **kwargs)
+        if is_intent and when == 'after-commit':
+            entered.set(); assert release.wait(20)
+        return result
+    monkeypatch.setattr(stages, '_durable_call', capture)
+    monkeypatch.setattr(journal, 'update_many', barrier)
+    results = []
+    async def handle(event):
+        turn = DOCUMENT_TURN.get(); key = event.source.chat_id
+        stage.calls.append((turn.work['request_id'], turn.phase))
+        result = await tool(stage, key, {'action': 'complete', 'request_id': turn.work['request_id'],
+            'outcome': 'completed'}, job=event_job(event))
+        assert result['status'] == 'recorded'
+        if turn.phase == 'origin' and turn.work['request_id'] == 'stage-root-0001':
+            stage.path.write_text('new scope with a cancelled server reply')
+            results.append(await tool(stage, key, {'action': 'next_stage', 'request_id': turn.work['request_id'],
+                'handoff_path': str(stage.path)}, job=event_job(event)))
+        event._gateway_accepted = True
+        capture_internal_response(event, 'actual completed result', successful=True)
+        capture_internal_delivery(event, SendResult(success=True, message_id='final-' + key))
+        finish_internal_receipt(event, ProcessingOutcome.SUCCESS)
+    async def cancel():
+        assert await asyncio.to_thread(entered.wait, 10)
+        assert operation
+        operation[0].cancel()
+        release.set()
+    stage.service.runner.adapter.handle_message = handle
+    rid = await begin(stage)
+    cancelling = asyncio.create_task(cancel())
+    try:
+        await asyncio.wait_for(stage.service.tick(), 20)
+        await cancelling
+        root = journal.get(rid); nid = root['next_stage']['request_id']
+        assert results and 'error' in results[0]
+        assert root['status'] == 'delivered' and journal.get(nid)['status'] == 'queued'
+        await stage.service.tick(); await stage.service.tick()
+        assert journal.get(nid)['status'] == 'delivered' and len(stage.calls) == 4
+    finally:
+        release.set()
+        await asyncio.gather(cancelling, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('committed', [False, True], ids=['before-commit', 'lost-commit-reply'])
+async def test_no_intent_return_reconciles_unknown_commit_without_replaying(stage, monkeypatch, committed):
+    journal = stage.service.journal
+    original = journal.update_many
+    failures = []
+    def unknown_reply(changes, **kwargs):
+        if any(values.get('status') == 'delivered' for values in changes.values()) and not failures:
+            failures.append(True)
+            if committed:
+                original(changes, **kwargs)
+            raise TimeoutError('unknown native return commit result')
+        return original(changes, **kwargs)
+    monkeypatch.setattr(journal, 'update_many', unknown_reply)
+    install_handler(stage)
+    rid = await begin(stage, request='return-without-intent')
+    await stage.service.tick()
+    root = journal.get(rid)
+    assert root['status'] == ('delivered' if committed else 'ambiguous')
+    assert not root.get('next_stage') and len(stage.calls) == 2 and failures == [True]
+    await stage.service.tick()
+    assert len(stage.calls) == 2
