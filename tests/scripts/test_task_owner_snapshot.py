@@ -1,5 +1,6 @@
 """Offline collector contracts; exercise the CLI with real SQLite and HWB files."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import sqlite3
@@ -43,6 +44,195 @@ def scan(home, previous=None, now=1000, checkpoint=None):
     proc = subprocess.run(args, env=dict(os.environ, HOME=str(home.parent), HERMES_HOME=str(home)),
                           capture_output=True, text=True, timeout=15, check=False)
     return proc.returncode, json.loads(proc.stdout)
+
+
+def adapter_cli(home, output, *extra, prepare=""):
+    argv = [str(SCRIPT), "--home", str(home), "--now", "1001", "--snapshot-output", str(output), *map(str, extra)]
+    command = [sys.executable, *argv]
+    if prepare:
+        driver = "import sys,runpy\nsys.path.insert(0," + repr(str(SCRIPT.parents[1])) + ")\n" + prepare
+        driver += "\nsys.argv=" + repr(argv) + "\nrunpy.run_path(sys.argv[0],run_name='__main__')\n"
+        command = [sys.executable, "-c", driver]
+    proc = subprocess.run(command, cwd=SCRIPT.parents[1], capture_output=True, text=True, timeout=20,
+                          env=dict(os.environ, HOME=str(home.parent), HERMES_HOME=str(home)), check=False)
+    assert proc.stdout, proc.stderr
+    projection = json.loads(proc.stdout)
+    assert proc.stdout.isascii() and len(proc.stdout.splitlines()) == 1
+    assert len(proc.stdout.encode("ascii")) <= 16384
+    assert "boards" not in projection and "executors" not in projection
+    return proc, projection
+
+
+def saved_baseline(home):
+    code, full = scan(home)
+    assert code == 0
+    baseline = home.parent / "baseline.json"
+    baseline.write_text(json.dumps(full))
+    checkpoint = home.parent / "checkpoint.json"
+    checkpoint.write_text(json.dumps({"schema": "task-owner-inspection-checkpoint/v2",
+        "observed_at": "1970-01-01T00:16:40+00:00", "consumed_fingerprints": {"snapshot_path": str(baseline)}}))
+    return baseline, checkpoint
+
+
+def test_adapter_full_artifact_matches_legacy_and_keeps_deadline(home):
+    worker(home, events=[{"kind": "turn_done", "text": "result\u2028\u0085"}])
+    baseline, checkpoint = saved_baseline(home)
+    inputs = [p.read_bytes() for p in (baseline, checkpoint)]
+    output = home.parent / "observations/new/full.json"
+    proc, projection = adapter_cli(home, output, "--checkpoint", checkpoint)
+    assert proc.returncode == 0 and projection["wakeAgent"] is False
+    raw = output.read_bytes()
+    full = json.loads(raw)
+    assert full == scan(home, now=1001, checkpoint=checkpoint)[1]
+    assert projection["snapshot_artifact"] == {"path": str(output.resolve()), "sha256": hashlib.sha256(raw).hexdigest(),
+        "bytes": len(raw), "observation_only": True}
+    assert projection["next_review_at"] == full["next_review_at"] == 2800
+    assert projection["requires_reconciliation"] is False
+    assert [p.read_bytes() for p in (baseline, checkpoint)] == inputs
+
+
+def test_adapter_global_delta_bound_includes_removals_and_full_inventory(home):
+    import shutil
+
+    with sqlite3.connect(home / "kanban.db") as db:
+        db.executemany("INSERT INTO tasks(id,status) VALUES(?, 'running')", [(f"old-{i}",) for i in range(25)])
+    old = home / "workers/old"; old.mkdir(parents=True)
+    (old / "meta.json").write_text('{"id":"old"}')
+    baseline, _ = saved_baseline(home)
+    shutil.rmtree(old)
+    with sqlite3.connect(home / "kanban.db") as db:
+        db.execute("DELETE FROM tasks")
+        db.executemany("INSERT INTO tasks(id,status) VALUES(?, 'done')", [(f"new-{i}",) for i in range(25)])
+    for i in range(25):
+        root = home / "workers" / f"new-{i}"; root.mkdir()
+        (root / "meta.json").write_text(json.dumps({"id": root.name}))
+    output = home.parent / "full.json"
+    proc, projection = adapter_cli(home, output, "--previous", baseline)
+    assert proc.returncode == 0 and projection["wakeAgent"] is True
+    full = json.loads(output.read_bytes())
+    assert all(full["delta"].values())
+    assert sum(map(len, projection["delta"].values())) <= 20
+    for key in full["delta"]:
+        assert projection["omitted"][key] == len(full["delta"][key]) - len(projection["delta"][key])
+    assert sum(projection["omitted"].values()) > 0 and projection["requires_reconciliation"] is True
+    assert len(full["boards"][0]["tasks"]) == len(full["executors"]) == 25
+
+
+def test_adapter_byte_bound_omits_oversized_entry_without_losing_artifact(home):
+    huge_id = "任务\u2028\u0085" * 5000
+    with sqlite3.connect(home / "kanban.db") as db:
+        db.execute("INSERT INTO tasks(id,status) VALUES(?, 'done')", (huge_id,))
+    output = home.parent / "full.json"
+    proc, projection = adapter_cli(home, output)
+    full = json.loads(output.read_bytes())
+    assert proc.returncode == 0 and len(output.read_bytes()) > 16384
+    assert any(t["id"] == huge_id for t in full["delta"]["tasks"])
+    assert all(t["id"] != huge_id for t in projection["delta"]["tasks"])
+    assert projection["omitted"]["tasks"] >= 1 and projection["requires_reconciliation"]
+
+
+def test_adapter_error_bound_and_collection_failure_publish_fresh_diagnostic(home):
+    for i in range(25):
+        root = home / "workers" / str(i); root.mkdir(parents=True)
+        (root / "meta.json").write_text("{")
+    output = home.parent / "full.json"
+    output.write_text('{"stale":true}')
+    proc, projection = adapter_cli(home, output)
+    full = json.loads(output.read_bytes())
+    assert proc.returncode == 2 and projection["wakeAgent"] and "read_error" in projection["reasons"]
+    assert len(full["errors"]) == 25 and len(projection["errors"]) <= 8
+    assert projection["omitted_errors"] == 25 - len(projection["errors"])
+    assert projection["snapshot_artifact"]["sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
+    assert projection["requires_reconciliation"] is True
+
+
+@pytest.mark.parametrize("events", [
+    [{"kind": "turn_done", "text": str(i)} for i in range(5)],
+    [{"kind": "tool", "data": "x" * 1000} for _ in range(100)],
+])
+def test_adapter_nested_completion_omission_or_backlog_requires_reconciliation(home, events):
+    worker(home, events=events)
+    proc, projection = adapter_cli(home, home.parent / "full.json")
+    assert proc.returncode == 0 and not any(projection["omitted"].values())
+    assert projection["requires_reconciliation"] is True
+
+
+@pytest.mark.parametrize("target", ["previous", "checkpoint", "referenced_baseline"])
+@pytest.mark.parametrize("alias", ["direct", "relative", "symlink", "hardlink", "parent_symlink"])
+def test_adapter_rejects_all_input_file_aliases_without_modifying_inputs(home, target, alias):
+    baseline, checkpoint = saved_baseline(home)
+    protected = checkpoint if target == "checkpoint" else baseline
+    output = protected
+    if alias == "relative":
+        output = Path(os.path.relpath(protected, SCRIPT.parents[1]))
+    elif alias in ("symlink", "hardlink"):
+        output = home.parent / "output-alias.json"
+        if alias == "symlink": output.symlink_to(protected)
+        else: os.link(protected, output)
+    elif alias == "parent_symlink":
+        parent = home.parent / "alias-directory"; parent.symlink_to(home.parent, target_is_directory=True)
+        output = parent / protected.name
+    original = [p.read_bytes() for p in (baseline, checkpoint)]
+    option, source = ("--previous", baseline) if target == "previous" else ("--checkpoint", checkpoint)
+    proc, projection = adapter_cli(home, output, option, source)
+    assert proc.returncode == 2 and projection["wakeAgent"] is True
+    assert projection["snapshot_artifact"] is None
+    assert any(e["reason"] == "snapshot_input_alias" for e in projection["errors"])
+    assert [p.read_bytes() for p in (baseline, checkpoint)] == original
+
+
+@pytest.mark.parametrize("input_kind", ["previous", "checkpoint", "referenced_baseline"])
+def test_adapter_input_read_failure_never_publishes_or_references_old_artifact(home, input_kind):
+    baseline, checkpoint = saved_baseline(home)
+    source = checkpoint if input_kind == "checkpoint" else baseline
+    source.write_text("{")
+    output = home.parent / "output.json"; output.write_text('{"wakeAgent":false}')
+    option, source = ("--previous", baseline) if input_kind == "previous" else ("--checkpoint", checkpoint)
+    proc, projection = adapter_cli(home, output, option, source)
+    assert proc.returncode == 2 and projection["wakeAgent"] and projection["snapshot_artifact"] is None
+    assert output.read_text() == '{"wakeAgent":false}'
+
+
+@pytest.mark.parametrize("fault", ["replace", "fsync", "parent"])
+def test_adapter_save_failure_has_no_stale_reference_and_can_recover(home, fault):
+    baseline, _ = saved_baseline(home)
+    output = home.parent / "output.json"; output.write_text('{"wakeAgent":false}')
+    prepare = ""
+    failed_output = output
+    if fault == "parent":
+        failed_output = output / "not-a-directory.json"
+    else:
+        seam = "utils.atomic_replace" if fault == "replace" else "utils.os.fsync"
+        prepare = "import utils\ndef fail(*args, **kwargs): raise OSError(28,'disk full')\n" + seam + "=fail\n"
+    proc, projection = adapter_cli(home, failed_output, "--previous", baseline, prepare=prepare)
+    assert proc.returncode == 2 and projection["wakeAgent"] and projection["snapshot_artifact"] is None
+    assert "snapshot_write_error" in projection["reasons"]
+    assert output.read_text() == '{"wakeAgent":false}'
+    assert not list(home.parent.glob(".task-owner-*.tmp"))
+    proc, recovered = adapter_cli(home, output, "--previous", baseline)
+    assert proc.returncode == 0 and recovered["wakeAgent"] is False and recovered["snapshot_artifact"]
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u0085"])
+def test_adapter_real_cron_transport_and_gate_with_unicode(home, monkeypatch, separator):
+    from cron.scheduler_prompt import _parse_wake_gate
+    from cron.scheduler_script import _run_job_script
+
+    worker(home, events=[{"kind": "turn_done", "text": "result" + separator}])
+    baseline, _ = saved_baseline(home)
+    output = home.parent / ("artifact" + separator + ".json")
+    wrapper = home / "scripts/collect.py"; wrapper.parent.mkdir()
+    argv = [str(SCRIPT), "--home", str(home), "--now", "1001", "--previous", str(baseline),
+            "--snapshot-output", str(output)]
+    wrapper.write_text("import runpy,sys\nsys.argv=" + repr(argv) + "\nrunpy.run_path(sys.argv[0],run_name='__main__')\n")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    ok, stdout = _run_job_script(str(wrapper), interpreter=sys.executable)
+    assert ok, stdout
+    assert _parse_wake_gate(stdout) is False and stdout.isascii()
+    assert json.loads(stdout)["snapshot_artifact"]["path"] == str(output.resolve())
+    (home / "kanban.db").write_bytes(b"broken")
+    ok, stdout = _run_job_script(str(wrapper), interpreter=sys.executable)
+    assert ok is False and "read_error" in stdout
 
 
 def test_stopped_completion_is_visible_and_observation_is_not_receipt(home):

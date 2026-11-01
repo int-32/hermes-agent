@@ -11,6 +11,7 @@ cron binding. The existing scheduler's last-line `wakeAgent` gate is reused.
 python scripts/task_owner_snapshot.py --home /absolute/isolated/home
 python scripts/task_owner_snapshot.py --home /absolute/isolated/home --previous /absolute/observed-snapshot.json
 python scripts/task_owner_snapshot.py --home /absolute/isolated/home --checkpoint /absolute/checkpoint.json
+python scripts/task_owner_snapshot.py --home /absolute/isolated/home --checkpoint /absolute/checkpoint.json --snapshot-output /absolute/new-observation.json
 ```
 
 `--home` is explicit; profile discovery is limited to its `profiles` directory.
@@ -27,6 +28,53 @@ established. Do not promote that output as a consumed baseline.
 Unicode text is preserved after JSON decoding; ASCII escaping keeps Unicode line
 separators inside JSON strings compatible with the existing cron last-line gate.
 Fingerprint serialization is unchanged.
+
+### Optional artifact and cron projection
+
+Without `--snapshot-output`, stdout and exit behavior stay as above. With it,
+the **same full observation** is saved at the explicit output path, and stdout
+becomes one ASCII JSON line for the existing cron gate. No consumer is changed:
+only a successful script with `wakeAgent=false` skips the agent.
+
+The projection contains `wakeAgent`, reasons, coverage counts/scope, errors,
+delta, observation/review times, and `snapshot_artifact` (resolved absolute path,
+SHA256 of the exact file bytes, byte count, `observation_only=true`). It excludes
+the full board/worker inventory. Four delta lists (`tasks`, `executors`,
+`removed_tasks`, `removed_executors`) **share 20 entries**, errors return at most
+8 entries, and the whole ASCII stdout line including its newline is at most
+16 KiB. Selection follows the existing list order, errors first; entries that
+do not fit the byte budget are omitted intact. Per-list `omitted` and
+`omitted_errors` count every excluded entry. The complete details remain in
+the artifact; this is a bound on model context, not collection CPU/memory.
+
+`requires_reconciliation=true` means errors, any omitted entry, an existing
+per-worker `omitted_completions`, or an event backlog needs attention. It does
+not claim the other observations were consumed. Neither the projection nor
+the candidate artifact is an ACK or an automatically promoted baseline.
+Reconcile omissions from the artifact and original evidence before the original
+owner advances its existing inspection checkpoint. A projection is not accepted
+by `--previous`; the full artifact is still observation schema v1.
+
+The existing `utils.atomic_write_text` writes the artifact (0600, temp file,
+file fsync, replace, best-effort directory fsync); new mode needs the existing
+Hermes source/runtime imports available. The caller owns the output location;
+missing parents are created through the helper. Output paths resolving to
+`--previous`, `--checkpoint`, or its referenced baseline are refused, including
+relative paths, symlinks, directory aliases and existing hardlinks. Resolve and
+identity checks assume caller-owned stable inputs/directories; this is not a
+hostile concurrent filesystem transaction. The shared writer retains its existing
+platform/bind-mount fallbacks; no new crash or exactly-once guarantee is added.
+
+Input-read failure returns exit 2 and **writes no artifact**. Collection failure
+may save a fresh diagnostic observation but still returns exit 2. Output
+validation/write/import/reference-budget failure returns exit 2 with
+`snapshot_write_error`, `wakeAgent=true`, and `snapshot_artifact=null`; it never
+references an old output as success. Existing output can be replaced on a
+successful save. A failed save can leave the old file (or an unacknowledged new
+file if failure followed replacement); only this invocation's successful return
+and matching byte hash identify a published observation. No checkpoint or native
+receipt is written. The projection's 16 KiB bound does not lift any downstream
+native request content limit; that separate integration is not implemented here.
 
 The full object is machine observation evidence; only its `delta`, reasons,
 coverage and gate belong in a model prompt. Keep snapshot files under the

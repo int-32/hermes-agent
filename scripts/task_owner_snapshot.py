@@ -13,12 +13,19 @@ from os import fstat
 from pathlib import Path
 import sqlite3
 import stat
+import sys
 import time
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 SCHEMA = "task-owner-observation/v1"
 EVENT_BYTES = 65536
 REVIEW_SECONDS = 1800
 TURN_COMPLETION_LIMIT = 64
+PROJECTION_BYTES = 16384
+PROJECTION_ITEMS = 20
+PROJECTION_ERRORS = 8
 
 
 def encoded(value, *, ensure_ascii=False):
@@ -33,17 +40,20 @@ def error(result, source, exc):
     # Exception text can contain task data or SQL values.
     known = {"unsupported_checkpoint_schema", "unsupported_snapshot_schema", "unsupported_board_schema",
              "event_stream_changed", "partial_event", "unsupported_event", "worker_id_mismatch",
-             "previous_board_unavailable", "completion_window_exceeded"}
+             "previous_board_unavailable", "completion_window_exceeded", "snapshot_input_alias",
+             "projection_reference_too_large"}
     reason = str(exc) if type(exc) is ValueError and str(exc) in known else type(exc).__name__
     result["errors"].append({"source": str(source), "error": type(exc).__name__, "reason": reason})
 
 
-def load_previous(previous=None, checkpoint=None):
+def load_previous(previous=None, checkpoint=None, *, protected=None):
     if checkpoint:
         record = json.loads(checkpoint.read_text(encoding="utf-8-sig"))
         if record.get("schema") != "task-owner-inspection-checkpoint/v2":
             raise ValueError("unsupported_checkpoint_schema")
         previous = Path(record["consumed_fingerprints"]["snapshot_path"])
+        if protected is not None:
+            protected.append(previous)
     if not previous:
         return {}
     data = json.loads(previous.read_text(encoding="utf-8-sig"))
@@ -309,26 +319,109 @@ def collect(home, previous=None, *, now=None):
     return result
 
 
+def projection_fits(value):
+    # ASCII JSON: characters equal transport bytes. Reserve newline + a true->false change.
+    return len(encoded(value, ensure_ascii=True)) + 2 <= PROJECTION_BYTES
+
+
+def project_observation(result, artifact=None):
+    """Bound model context independently of the complete machine observation."""
+    omitted = {key: len(items) for key, items in result["delta"].items()}
+    value = {"wakeAgent": result["wakeAgent"], "reasons": result["reasons"],
+             "coverage": {"scope": result["coverage"], "boards_read": len(result["boards"]),
+                          "workers_observed": len(result["executors"]), "complete": not result["errors"]},
+             "errors": [], "omitted_errors": len(result["errors"]),
+             "delta": {key: [] for key in omitted}, "omitted": omitted,
+             "snapshot_artifact": artifact, "observed_at": result["observed_at"],
+             "next_review_at": result["next_review_at"], "checkpoint_meaning": result["checkpoint_meaning"],
+             "requires_reconciliation": True}
+    if not projection_fits(value):
+        raise ValueError("projection_reference_too_large")
+    for item in result["errors"][:PROJECTION_ERRORS]:
+        value["errors"].append(item)
+        value["omitted_errors"] -= 1
+        if not projection_fits(value):
+            value["errors"].pop()
+            value["omitted_errors"] += 1
+    kept = 0
+    for key, items in result["delta"].items():
+        for item in items:
+            if kept == PROJECTION_ITEMS:
+                break
+            value["delta"][key].append(item)
+            omitted[key] -= 1
+            if projection_fits(value):
+                kept += 1
+            else:
+                value["delta"][key].pop()
+                omitted[key] += 1
+    value["requires_reconciliation"] = bool(result["errors"] or any(omitted.values())
+        or any(item.get("has_more") for item in result["executors"])
+        or any(item["omitted_completions"] for item in result["delta"]["executors"]))
+    return value
+
+
+def snapshot_destination(output, protected):
+    """Check both path aliases and existing hardlinks before the symlink-following writer."""
+    destination = output.resolve()
+    for source in protected:
+        if destination == source.resolve():
+            raise ValueError("snapshot_input_alias")
+        try:
+            same = destination.samefile(source)
+        except FileNotFoundError:
+            same = False
+        if same:
+            raise ValueError("snapshot_input_alias")
+    return destination
+
+
+def save_observation(output, result, protected):
+    from utils import atomic_write_text
+
+    destination = snapshot_destination(output, protected)
+    content = encoded(result, ensure_ascii=True) + "\n"
+    artifact = {"path": str(destination), "sha256": hashlib.sha256(content.encode("ascii")).hexdigest(),
+                "bytes": len(content), "observation_only": True}
+    value = project_observation(result, artifact)
+    atomic_write_text(destination, content, tmp_prefix=".task-owner-", mode=0o600, fsync_dir=True)
+    return value
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--home", required=True, type=Path)
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--previous", type=Path)
     group.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--snapshot-output", type=Path, help="save full observation here; stdout becomes a bounded cron projection")
     parser.add_argument("--now", type=float, help="explicit clock for offline replay")
     args = parser.parse_args()
     if args.now is not None and not math.isfinite(args.now):
         parser.error("--now must be finite")
+    protected = [path for path in (args.previous, args.checkpoint) if path is not None]
+    inputs_ok = True
     try:
-        previous = load_previous(args.previous, args.checkpoint)
+        previous = load_previous(args.previous, args.checkpoint, protected=protected)
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        inputs_ok = False
         result = collect(args.home, now=args.now)
         error(result, args.checkpoint or args.previous, exc)
         result.update(wakeAgent=True, reasons=sorted(set(result["reasons"] + ["read_error"])))
     else:
         result = collect(args.home, previous, now=args.now)
+    value = result
+    if args.snapshot_output is not None:
+        value = project_observation(result)
+        if inputs_ok:
+            try:
+                value = save_observation(args.snapshot_output, result, protected)
+            except (OSError, ValueError, RuntimeError, ImportError) as exc:
+                error(result, "snapshot_output", exc)
+                result.update(wakeAgent=True, reasons=sorted(set(result["reasons"] + ["snapshot_write_error"])))
+                value = project_observation(result)
     # The cron gate uses str.splitlines(), including U+0085/U+2028 as boundaries.
-    print(encoded(result, ensure_ascii=True))
+    print(encoded(value, ensure_ascii=True))
     return 2 if result["errors"] else 0
 
 
