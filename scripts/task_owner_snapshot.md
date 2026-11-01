@@ -164,3 +164,50 @@ changed by this candidate. At reviewed rollout, replace the old collector
 call with a thin invocation of this version, then retire that old call; do not
 run both indefinitely. The actual job wrapper, profile bindings and runtime
 loading require independent Ops evidence through the task's owning main.
+
+## No-argument cron wrapper
+
+`scripts/task_owner_gate.py` is the maintained entry template for an existing
+Agent job's `script` field. Copy it unchanged under that profile's `scripts/`
+with an adjacent, same-stem `.json` file containing five absolute path bindings:
+`home`, `collector`, `checkpoint`, `evidence_directory`, `source_root`. Machine
+paths belong in that private delivery file, not in the public source template.
+The collector must resolve under the bound home's `scripts/`; the evidence
+parent must already exist. The wrapper allocates one unique `evidence-*` directory
+with `snapshot.json` per invocation and retains it, including on a skipped Agent
+run. Retention remains the original owner's responsibility; preserve referenced
+and unconsumed candidates until processing/recovery completes.
+
+`source_root` binds one approved, complete Hermes source root. The wrapper
+prepends it and verifies the imported `utils` file's location before invoking
+the collector. This is needed for the bare cron fallback, which does not add a
+managed source bootstrap; `atomic_write_text` also imports `hermes_constants`
+lazily. The selected interpreter must provide that source's existing dependencies
+(including `hermes_yaml`/ruamel). A source path alone does not supply dependencies
+or establish the installed interpreter. No PM discovery/activation or environment
+installation is added by the wrapper. The normal managed cron bootstrap remains
+supported. Missing imports or other preparation failures are explicit stderr/exit2;
+the collector has not started in that case.
+
+The wrapper accepts no arguments. It passes only the existing home/checkpoint/
+snapshot-output arguments to **one in-process** collector invocation, preserving
+its stdout and `SystemExit`. It never writes the v2 checkpoint, promotes a candidate,
+or acknowledges work. No generation index, second task store, schedule or shared
+consumer change is involved. `processing_prompt` and `job_payloads` render the
+private processing instruction and single-job forward/rollback tool arguments
+offline; they do not apply them. Rollback requires the actual original prompt.
+Use a relative script name for the existing cronjob update API. Clear both
+monitor sources with empty strings, keep `no_agent=false`, and preserve schedule,
+provider/model and delivery by omitting them from the field delta. Runtime path
+resolution still enforces the profile scripts boundary.
+
+The Agent must consume the cached prerun result rather than executing a collector
+again, even if `context_from=self` contains an older workflow. Verify artifact
+path/hash/bytes and reconcile the **full** evidence before advancing the original
+checkpoint's consumed reference, preserving its other fields. Nonzero, unknown,
+omission/backlog or unfinished processing does not advance a successful baseline.
+No native ACK is inferred from that update. The fixed private package and its
+single-job paused/drained switch remain separately reviewed operations; nothing
+in rendering a package installs files or edits a job. The existing 1800-second
+review deadline remains, so an unchanged 30-minute natural fire may still wake
+for `review_due`.
