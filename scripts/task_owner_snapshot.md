@@ -60,8 +60,18 @@ file fsync, replace, best-effort directory fsync); new mode needs the existing
 Hermes source/runtime imports available. The caller owns the output location;
 missing parents are created through the helper. Output paths resolving to
 `--previous`, `--checkpoint`, or its referenced baseline are refused, including
-relative paths, symlinks, directory aliases and existing hardlinks. Resolve and
-identity checks assume caller-owned stable inputs/directories; this is not a
+relative paths, symlinks, directory aliases and existing hardlinks. These checks
+also protect this invocation's observation inputs: discovered
+Kanban databases (including SQLite's reserved WAL/SHM/journal paths), worker
+metadata and event streams. A call-local set records paths before I/O, including
+failed reads and missing candidates. Inventory checks finish the same directory's
+stat pass to register directory/unknown candidates before rethrowing its first
+error; ordinary artifact files are excluded. Prior board/worker observations and source
+errors retain known paths when inventory disappears. The set is not saved, and
+an error snapshot remains unsuitable as a healthy/consumed baseline. Both worker
+paths are registered before metadata parsing. No second scan or task registry is
+added; unrelated artifact paths inside the explicit home remain valid outputs.
+Resolve and identity checks assume caller-owned stable inputs/directories; this is not a
 hostile concurrent filesystem transaction. The shared writer retains its existing
 platform/bind-mount fallbacks; no new crash or exactly-once guarantee is added.
 

@@ -836,3 +836,224 @@ def test_coverage_finalization_survives_all_collection_error_paths(home, fault):
     assert code == 0 and recovered["errors"] == [] and recovered["delta"]["removed_tasks"] == []
     code, stable = scan(home, recovered, 1006)
     assert code == 0 and stable["wakeAgent"] is False
+
+
+# ADAPTER-R1: preserve the independent 12-case behavior assertions.
+ROOT = SCRIPT.parents[1]
+
+
+@pytest.fixture
+def fixture(tmp_path):
+    home = tmp_path / 'fixture-home'
+    home.mkdir()
+    with sqlite3.connect(home / 'kanban.db') as c:
+        c.executescript("CREATE TABLE tasks(id TEXT PRIMARY KEY,status TEXT); INSERT INTO tasks VALUES('t1','running');")
+    worker = home / 'workers/w1'
+    worker.mkdir(parents=True)
+    (worker / 'meta.json').write_text('{"id":"w1","status":"stopped"}')
+    (worker / 'events.jsonl').write_text('{"kind":"turn_done","text":"fixture result"}\n')
+    return home
+
+
+def cli(home, output=None, *extra, prepare=''):
+    argv = [str(SCRIPT), '--home', str(home), '--now', '1000', *map(str, extra)]
+    if output is not None:
+        argv += ['--snapshot-output', str(output)]
+    cmd = [sys.executable, *argv]
+    if prepare:
+        driver = 'import sys,runpy\n' + prepare + '\nsys.argv=' + repr(argv) + '\nrunpy.run_path(sys.argv[0],run_name="__main__")'
+        cmd = [sys.executable, '-c', driver]
+    p = subprocess.run(cmd, cwd=ROOT, env=dict(os.environ, HOME=str(home.parent), HERMES_HOME=str(home)), capture_output=True, text=True, timeout=20, check=False)
+    assert p.stdout, p.stderr
+    assert p.stdout.isascii() and len(p.stdout.splitlines()) == 1
+    if output is not None:
+        assert len(p.stdout.encode()) <= 16384
+    return p, json.loads(p.stdout)
+
+
+@pytest.mark.parametrize('source', ['kanban.db', 'workers/w1/meta.json', 'workers/w1/events.jsonl'])
+@pytest.mark.parametrize('alias', ['direct', 'symlink', 'parent_symlink', 'hardlink'])
+def test_observation_input_must_not_be_output(fixture, source, alias):
+    target = fixture / source
+    before = target.read_bytes()
+    output = target
+    if alias == 'symlink':
+        output = fixture.parent / 'alias.json'
+        output.symlink_to(target)
+    elif alias == 'parent_symlink':
+        output = fixture.parent / 'parent-alias'
+        output.symlink_to(target.parent, target_is_directory=True)
+        output = output / target.name
+    elif alias == 'hardlink':
+        output = fixture.parent / 'alias.json'
+        os.link(target, output)
+    p, value = cli(fixture, output)
+    # Required input-safety expectation; a103dab is expected to violate it.
+    assert p.returncode == 2, {'source': source, 'alias': alias, 'exit': p.returncode, 'original_changed': target.read_bytes() != before, 'artifact': value['snapshot_artifact']}
+    assert value['snapshot_artifact'] is None and target.read_bytes() == before
+
+
+@pytest.mark.parametrize("source", ["kanban.db", "workers/w1/meta.json", "workers/w1/events.jsonl"])
+@pytest.mark.parametrize("fault", ["unreadable", "missing"])
+def test_failed_or_missing_observation_input_is_still_protected(fixture, source, fault):
+    target = fixture / source
+    if fault == "missing":
+        target.unlink()
+        before = None
+    else:
+        target.write_bytes(b"{bad}\n")
+        before = target.read_bytes()
+    p, value = cli(fixture, target)
+    assert p.returncode == 2 and value["snapshot_artifact"] is None
+    assert any(e["reason"] == "snapshot_input_alias" for e in value["errors"])
+    assert (target.read_bytes() if target.exists() else None) == before
+
+
+def test_failed_metadata_cannot_allow_overwriting_its_unread_event_source(fixture):
+    meta = fixture / "workers/w1/meta.json"
+    events = meta.with_name("events.jsonl")
+    before = events.read_bytes()
+    meta.write_bytes(b"{")
+    p, value = cli(fixture, events)
+    assert p.returncode == 2 and value["snapshot_artifact"] is None
+    assert any(e["reason"] == "snapshot_input_alias" for e in value["errors"])
+    assert events.read_bytes() == before
+
+
+@pytest.mark.parametrize("source", ["board", "metadata", "events"])
+@pytest.mark.parametrize("prior_error", [False, True])
+def test_prior_sources_remain_protected_when_their_directory_disappears(fixture, source, prior_error):
+    board = fixture / "kanban/boards/other"
+    board.mkdir(parents=True)
+    with sqlite3.connect(board / "kanban.db") as db:
+        db.executescript("CREATE TABLE tasks(id TEXT,status TEXT);INSERT INTO tasks VALUES('other','done')")
+    if prior_error:
+        failed = board / "kanban.db" if source == "board" else fixture / "workers/w1/meta.json"
+        failed.write_bytes(b"{")
+    p, baseline = cli(fixture)
+    assert p.returncode == (2 if prior_error else 0)
+    previous = fixture.parent / "baseline.json"
+    previous.write_text(json.dumps(baseline))
+    if source == "board":
+        target = board / "kanban.db"
+        board.rename(fixture / "retired-board")
+    else:
+        target = fixture / "workers/w1" / ("meta.json" if source == "metadata" else "events.jsonl")
+        target.parent.rename(fixture / "retired-worker")
+    p, value = cli(fixture, target, "--previous", previous)
+    assert p.returncode == 2 and value["snapshot_artifact"] is None
+    assert any(e["reason"] == "snapshot_input_alias" for e in value["errors"])
+    assert not target.exists()
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("inventory", ["profiles", "peer_boards"])
+def test_early_inventory_failure_does_not_allow_overwriting_known_default_database(fixture, inventory):
+    peer = fixture / "profiles/peer"
+    restricted = fixture / "profiles"
+    target = fixture / "kanban.db"
+    if inventory == "peer_boards":
+        restricted = peer / "kanban/boards"
+        restricted.mkdir(parents=True)
+        target = peer / "kanban.db"
+        with sqlite3.connect(target) as db:
+            db.execute("CREATE TABLE tasks(id TEXT,status TEXT)")
+    else:
+        restricted.mkdir()
+    before = target.read_bytes()
+    restricted.chmod(0)
+    try:
+        p, value = cli(fixture, target)
+    finally:
+        restricted.chmod(0o700)
+    assert p.returncode == 2 and value["snapshot_artifact"] is None
+    assert any(e["reason"] == "snapshot_input_alias" for e in value["errors"])
+    assert target.read_bytes() == before
+
+
+@pytest.mark.parametrize("fallback", ["EXDEV", "EBUSY"])
+@pytest.mark.parametrize("source", ["kanban.db", "workers/w1/meta.json", "workers/w1/events.jsonl"])
+def test_source_hardlink_is_rejected_before_helper_in_place_fallback(fixture, source, fallback):
+    target = fixture / source
+    output = fixture.parent / "hardlink.json"
+    os.link(target, output)
+    before = target.read_bytes()
+    prepare = ("import utils,errno\ndef fail(*a,**kw): raise OSError(errno." + fallback +
+               ", 'fixture fallback')\nutils.os.replace=fail\n")
+    p, value = cli(fixture, output, prepare=prepare)
+    assert p.returncode == 2 and value["snapshot_artifact"] is None
+    assert any(e["reason"] == "snapshot_input_alias" for e in value["errors"])
+    assert target.read_bytes() == output.read_bytes() == before
+
+
+@pytest.mark.parametrize("fallback", [None, "EXDEV", "EBUSY"])
+def test_legal_output_inside_home_and_fresh_diagnostic_keep_helper_contract(fixture, fallback):
+    inputs = [fixture / "kanban.db", fixture / "workers/w1/meta.json", fixture / "workers/w1/events.jsonl"]
+    before = [p.read_bytes() for p in inputs]
+    output = fixture / "workers/w1/observation.json"
+    prepare = ""
+    if fallback:
+        prepare = ("import utils,errno\ndef fail(*a,**kw): raise OSError(errno." + fallback +
+                   ", 'fixture fallback')\nutils.os.replace=fail\n")
+    p, value = cli(fixture, output, prepare=prepare)
+    assert p.returncode == 0 and value["snapshot_artifact"] is not None
+    assert hashlib.sha256(output.read_bytes()).hexdigest() == value["snapshot_artifact"]["sha256"]
+    assert [p.read_bytes() for p in inputs] == before
+    inputs[0].write_bytes(b"broken")
+    p, diagnostic = cli(fixture, output, prepare=prepare)
+    assert p.returncode == 2 and "read_error" in diagnostic["reasons"]
+    assert diagnostic["snapshot_artifact"] and json.loads(output.read_bytes())["errors"]
+    assert inputs[0].read_bytes() == b"broken"
+
+
+@pytest.mark.parametrize("alias", ["direct", "hardlink"])
+def test_sqlite_wal_input_is_protected_while_committed_rows_live_in_it(fixture, alias):
+    db = sqlite3.connect(fixture / "kanban.db")
+    try:
+        assert db.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        db.execute("INSERT INTO tasks VALUES('wal-row','done')")
+        db.commit()
+        target = fixture / "kanban.db-wal"
+        before = target.read_bytes()
+        output = target
+        if alias == "hardlink":
+            output = fixture.parent / "wal-alias.json"
+            os.link(target, output)
+        p, value = cli(fixture, output)
+        assert p.returncode == 2 and value["snapshot_artifact"] is None
+        assert any(e["reason"] == "snapshot_input_alias" for e in value["errors"])
+        assert target.read_bytes() == before
+        assert db.execute("SELECT status FROM tasks WHERE id='wal-row'").fetchone() == ("done",)
+    finally:
+        db.close()
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("inventory", ["profiles", "boards", "workers"])
+@pytest.mark.parametrize("bad_name", ["aa-bad", "zz-bad"])
+def test_discovered_sources_stay_protected_when_a_sibling_inventory_stat_fails(fixture, inventory, bad_name):
+    if inventory == "workers":
+        root = fixture / "workers"
+        target = root / "w1/meta.json"
+    else:
+        root = fixture / ("profiles" if inventory == "profiles" else "kanban/boards")
+        peer = root / "peer"
+        peer.mkdir(parents=True)
+        target = peer / "kanban.db"
+        with sqlite3.connect(target) as db:
+            db.execute("CREATE TABLE tasks(id TEXT,status TEXT)")
+    (root / bad_name).symlink_to(bad_name)
+    before = target.read_bytes()
+    p, value = cli(fixture, target)
+    assert p.returncode == 2 and value["snapshot_artifact"] is None
+    assert any(e["reason"] == "snapshot_input_alias" for e in value["errors"])
+    assert target.read_bytes() == before
+
+
+@pytest.mark.parametrize("directory", ["profiles", "kanban/boards", "workers"])
+def test_normal_artifact_file_in_inventory_root_can_be_written_again(fixture, directory):
+    output = fixture / directory / "observation.json"
+    for _ in range(2):
+        p, value = cli(fixture, output)
+        assert p.returncode == 0 and value["snapshot_artifact"] is not None
+        assert value["snapshot_artifact"]["sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()

@@ -26,6 +26,8 @@ TURN_COMPLETION_LIMIT = 64
 PROJECTION_BYTES = 16384
 PROJECTION_ITEMS = 20
 PROJECTION_ERRORS = 8
+SQLITE_INPUT_SUFFIXES = ("", "-wal", "-shm", "-journal")
+BOARD_INPUT_FILES = tuple("kanban.db" + suffix for suffix in SQLITE_INPUT_SUFFIXES)
 
 
 def encoded(value, *, ensure_ascii=False):
@@ -53,7 +55,7 @@ def load_previous(previous=None, checkpoint=None, *, protected=None):
             raise ValueError("unsupported_checkpoint_schema")
         previous = Path(record["consumed_fingerprints"]["snapshot_path"])
         if protected is not None:
-            protected.append(previous)
+            protected.add(previous)
     if not previous:
         return {}
     data = json.loads(previous.read_text(encoding="utf-8-sig"))
@@ -91,13 +93,28 @@ def check_board_coverage(previous, result):
     result["delta"]["removed_tasks"] = [dict(database=db, id=tid) for db, tid in sorted(removed) if db in observed]
 
 
-def directories(root):
+def directories(root, *, protected=None, source_files=()):
     # Path.glob can suppress permission/read errors as if inventory were empty.
     try:
         paths = sorted(root.iterdir())
     except FileNotFoundError:
         return []
-    return [path for path in paths if stat.S_ISDIR(path.stat().st_mode)]
+    found, failure = [], None
+    for path in paths:
+        try:
+            is_directory = stat.S_ISDIR(path.stat().st_mode)
+        except OSError as exc:
+            if failure is None:
+                failure = exc
+            is_directory = None
+        # Unknown entries stay protected, but ordinary artifact files are not directories.
+        if is_directory is not False and protected is not None:
+            protected.update(path / name for name in source_files)
+        if is_directory:
+            found.append(path)
+    if failure is not None:
+        raise failure
+    return found
 
 
 def history(conn, tables, task_id, *, tail=False):
@@ -220,10 +237,13 @@ def collect_events(path, old, item):
     return completions
 
 
-def collect_workers(home, previous, result, now):
+def collect_workers(home, previous, result, now, protected):
     old_workers = {item["id"]: item for item in previous.get("executors", [])}
-    for root in directories(home / "workers"):
+    for root in directories(home / "workers", protected=protected, source_files=("meta.json", "events.jsonl")):
         path = root / "meta.json"
+        events = root / "events.jsonl"
+        # Register both before metadata parsing: a failed meta read must not expose its log.
+        protected.update((path, events))
         try:
             raw = path.read_bytes()
             meta = json.loads(raw)
@@ -231,7 +251,6 @@ def collect_workers(home, previous, result, now):
             if not isinstance(meta, dict) or meta.get("id", worker_id) != worker_id:
                 raise ValueError("worker_id_mismatch")
             old = old_workers.get(worker_id, {})
-            events = path.parent / "events.jsonl"
             item = {key: meta.get(key) for key in ("status", "cwd", "thread_id", "session_id")}
             item.update(id=worker_id, pid_hint=meta.get("pid"), metadata_digest=hashlib.sha256(raw).hexdigest(),
                         event_size=None, result_state="UNVERIFIED", has_more=False,
@@ -260,20 +279,49 @@ def collect_workers(home, previous, result, now):
             error(result, path, exc)
 
 
-def collect(home, previous=None, *, now=None):
+def protect_board_inputs(path, protected):
+    # SQLite can read committed rows from WAL and consult its other reserved companion files.
+    protected.update(Path(str(path) + suffix) for suffix in SQLITE_INPUT_SUFFIXES)
+
+
+def observation_inputs(home, previous, protected):
+    """Call-local paths, including confirmed sources now absent or hidden by inventory errors."""
+    if protected is None:
+        protected = set()
+    protect_board_inputs(home / "kanban.db", protected)
+    for board in previous.get("boards", []):
+        protect_board_inputs(Path(board["database"]), protected)
+    for item in previous.get("errors", []):
+        source = Path(item["source"])
+        if item.get("reason") == "previous_board_unavailable" or source.name == "kanban.db":
+            protect_board_inputs(source, protected)
+        elif source.name in ("meta.json", "events.jsonl") and source.parent.parent.name == "workers":
+            protected.update((source.parent / "meta.json", source.parent / "events.jsonl"))
+    for item in previous.get("executors", []):
+        root = home / "workers" / item["id"]
+        protected.update((root / "meta.json", root / "events.jsonl"))
+    return protected
+
+
+def collect(home, previous=None, *, now=None, protected=None):
     now = time.time() if now is None else now
     previous = previous or {}
+    protected = observation_inputs(home, previous, protected)
     result = {"schema": SCHEMA, "boards": [], "executors": [], "errors": [], "observed_at": now,
               "delta": {"tasks": [], "executors": [], "removed_tasks": [], "removed_executors": []}}
     try:
         if not home.is_dir():
             raise FileNotFoundError("observation home missing")
         old_tasks = task_index(previous)
-        homes = [("default", home), *((path.name, path) for path in directories(home / "profiles"))]
+        homes = [("default", home), *((path.name, path) for path in directories(
+            home / "profiles", protected=protected, source_files=BOARD_INPUT_FILES))]
         seen = set()
         for profile, root in homes:
-            candidates = [root / "kanban.db", *(path / "kanban.db" for path in directories(root / "kanban" / "boards"))]
+            protect_board_inputs(root / "kanban.db", protected)
+            candidates = [root / "kanban.db", *(path / "kanban.db" for path in directories(
+                root / "kanban" / "boards", protected=protected, source_files=BOARD_INPUT_FILES))]
             for path in candidates:
+                protect_board_inputs(path, protected)
                 try:
                     path.stat()
                 except FileNotFoundError:
@@ -287,7 +335,7 @@ def collect(home, previous=None, *, now=None):
                     error(result, path, exc)
         if not seen:
             error(result, home, FileNotFoundError())
-        collect_workers(home, previous, result, now)
+        collect_workers(home, previous, result, now, protected)
         unread = {item["source"] for item in result["errors"]}
         current_workers = {item["id"] for item in result["executors"]}
         result["delta"]["removed_executors"] = sorted(item["id"] for item in previous.get("executors", [])
@@ -364,6 +412,9 @@ def project_observation(result, artifact=None):
 def snapshot_destination(output, protected):
     """Check both path aliases and existing hardlinks before the symlink-following writer."""
     destination = output.resolve()
+    # Identify direct collisions before a different, unreadable source can abort identity checks.
+    if destination in {source.absolute() for source in protected}:
+        raise ValueError("snapshot_input_alias")
     for source in protected:
         if destination == source.resolve():
             raise ValueError("snapshot_input_alias")
@@ -399,17 +450,17 @@ def main():
     args = parser.parse_args()
     if args.now is not None and not math.isfinite(args.now):
         parser.error("--now must be finite")
-    protected = [path for path in (args.previous, args.checkpoint) if path is not None]
+    protected = {path for path in (args.previous, args.checkpoint) if path is not None}
     inputs_ok = True
     try:
         previous = load_previous(args.previous, args.checkpoint, protected=protected)
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         inputs_ok = False
-        result = collect(args.home, now=args.now)
+        result = collect(args.home, now=args.now, protected=protected)
         error(result, args.checkpoint or args.previous, exc)
         result.update(wakeAgent=True, reasons=sorted(set(result["reasons"] + ["read_error"])))
     else:
-        result = collect(args.home, previous, now=args.now)
+        result = collect(args.home, previous, now=args.now, protected=protected)
     value = result
     if args.snapshot_output is not None:
         value = project_observation(result)
