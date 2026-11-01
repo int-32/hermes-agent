@@ -33,7 +33,7 @@ def case(evidence):
                   evidence_paths=['old-evidence'], failed_or_unverified={'unknown':'preserve'})
     record['consumed_fingerprints']['existing_owner_field'] = 'retain'
     evidence.checkpoint.write_text(json.dumps(record))
-    evidence.expected = evidence.home.parent/'verified.json' 
+    evidence.expected = evidence.home.parent/'verified.json'
     evidence.expected.write_text(verifier.render(verifier.verify(evidence.projection_path, evidence.checkpoint)))
     evidence.before = evidence.home.parent/'before.json'
     evidence.original = evidence.checkpoint.read_bytes()
