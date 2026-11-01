@@ -222,6 +222,8 @@ def reference(checkpoint, cache):
     collector.task_index(baseline)
     if 'errors' in baseline:
         errors(baseline['errors'])
+    if 'observed_at' in baseline:
+        require(finite(baseline['observed_at']), 'invalid_baseline_clock')
     deadline = baseline.get('next_review_at', stamp.timestamp() + collector.REVIEW_SECONDS)
     require(finite(deadline), 'invalid_baseline_clock')
     return baseline, facts, deadline, stamp.tzinfo is not None
@@ -232,6 +234,22 @@ def redacted_projection(value):
     raw = collector.encoded(value, ensure_ascii=True)
     return json.loads(redact_sensitive_text(raw, force=True), object_pairs_hook=unique_object,
                       parse_constant=lambda value: require(False, 'nonfinite_json'))
+
+
+def projection_matches(actual, expected, path=()):
+    # Only root schema clocks share numeric int/float semantics. In particular,
+    # false/0 differ at the native gate, and counts must retain their JSON type.
+    if path in (('observed_at',), ('next_review_at',)):
+        return finite(actual) and actual == expected
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return actual.keys() == expected.keys() and all(
+            projection_matches(actual[key], value, (*path, key)) for key, value in expected.items())
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            projection_matches(left, right, (*path, index)) for index, (left, right) in enumerate(zip(actual, expected)))
+    return actual == expected
 
 
 def unresolved(full, projection, baseline, zoned):
@@ -277,7 +295,7 @@ def verify(projection_path, checkpoint_path, *, stdin=None):
         require(facts['sha256'] == artifact['sha256'], 'artifact_hash_mismatch')
         full = decode(entry); observation(full)
         expected = collector.project_observation(full, artifact)
-        require(redacted_projection(incoming) == redacted_projection(expected), 'projection_mismatch')
+        require(projection_matches(redacted_projection(incoming), redacted_projection(expected)), 'projection_mismatch')
         report['snapshot_artifact'] = artifact
         checkpoint_entry, report['checkpoint'] = read_file(checkpoint_path, cache)
         baseline, report['consumed_snapshot'], deadline, zoned = reference(decode(checkpoint_entry), cache)

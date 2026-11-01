@@ -239,6 +239,10 @@ path, bytes and SHA256 must still match the unredacted file exactly. Output neve
 contains the full task/worker text. The baseline follows the existing v2 consumer's
 reference/deadline compatibility, including its ISO `observed_at` plus 1800s fallback;
 a missing baseline `errors` field or timezone remains an explicit unknown.
+Projection comparison preserves JSON types for flags, counts and nested values;
+only the two root numeric clocks permit equal integer/float representations.
+A present baseline `observed_at` must be a finite number; an absent legacy field
+keeps its existing fallback. No collection-baseline chronology binding is inferred.
 
 Exit 0 means **evidence ready for owner processing**, not that it was processed.
 Exit 2 rejects invalid/unreadable/missing/changed evidence, identity/schema/reference

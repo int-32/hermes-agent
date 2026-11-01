@@ -346,3 +346,69 @@ def test_artifact_reference_does_not_forward_arbitrary_content(evidence):
     code, report = invoke(evidence)
     assert code == 2 and report['issues'] == ['invalid_artifact_reference']
     assert 'untrusted arbitrary content' not in json.dumps(report)
+
+
+def test_projection_wake_numeric_is_not_the_native_false_gate(evidence):
+    from cron.scheduler_prompt import _parse_wake_gate
+    assert evidence.projection['wakeAgent'] is False
+    assert _parse_wake_gate(json.dumps(evidence.projection)) is False
+    evidence.projection['wakeAgent'] = 0
+    assert _parse_wake_gate(json.dumps(evidence.projection)) is True
+    evidence.projection_path.write_text(json.dumps(evidence.projection))
+    code, report = invoke(evidence)
+    assert code == 2 and not report['ready_for_processing'], report
+
+
+@pytest.mark.parametrize(('path', 'value'), [
+    (('requires_reconciliation',), 0), (('coverage', 'complete'), 1),
+    (('coverage', 'boards_read'), True), (('coverage', 'workers_observed'), True),
+    (('omitted', 'tasks'), False), (('omitted_errors',), False),
+])
+def test_projection_boolean_and_count_shapes_are_distinct(evidence, path, value):
+    target = evidence.projection
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    evidence.projection_path.write_text(json.dumps(evidence.projection))
+    code, report = invoke(evidence)
+    assert code == 2 and report['issues'] == ['projection_mismatch']
+
+
+def test_supplied_baseline_clock_error_is_not_healthy(evidence):
+    from scripts.task_owner_snapshot import load_previous, collect
+    old = json.loads(evidence.baseline.read_bytes()); old['observed_at'] = 'invalid'
+    evidence.baseline.write_text(json.dumps(old))
+    actual = collect(evidence.home, load_previous(checkpoint=evidence.checkpoint), now=1001)
+    assert any(e['source'] == 'review_clock' for e in actual['errors'])
+    code, report = invoke(evidence)
+    assert code != 0 and not report['ready_for_processing'], report
+
+
+@pytest.mark.parametrize('clock', [None, False])
+def test_present_baseline_clock_is_a_finite_number(evidence, clock):
+    old = json.loads(evidence.baseline.read_bytes()); old['observed_at'] = clock
+    evidence.baseline.write_text(json.dumps(old))
+    code, report = invoke(evidence)
+    assert code == 2 and report['issues'] == ['invalid_baseline_clock']
+
+
+@pytest.mark.parametrize('number_type', [int, float])
+def test_numeric_projection_clocks_keep_existing_number_compatibility(evidence, number_type):
+    for field in ('observed_at', 'next_review_at'):
+        evidence.projection[field] = number_type(evidence.projection[field])
+    evidence.projection_path.write_text(json.dumps(evidence.projection))
+    code, report = invoke(evidence)
+    assert code == 0 and report['ready_for_processing']
+
+
+@pytest.mark.parametrize('missing', [('observed_at',), ('observed_at', 'next_review_at')])
+def test_absent_legacy_baseline_clock_keeps_v2_reference_fallback(evidence, missing):
+    from scripts.task_owner_snapshot import load_previous
+    old = json.loads(evidence.baseline.read_bytes())
+    for field in missing:
+        old.pop(field)
+    evidence.baseline.write_text(json.dumps(old))
+    deadline = load_previous(checkpoint=evidence.checkpoint)['next_review_at']
+    code, report = invoke(evidence)
+    assert code == 0 and report['baseline_review_deadline'] == deadline
+    assert report['consumption'] == report['native_ack'] == 'UNVERIFIED' and not report['checkpoint_written']
