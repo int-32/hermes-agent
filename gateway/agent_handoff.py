@@ -149,9 +149,11 @@ class HandoffJournal:
         return updated
 
     def pending(self):
+        from gateway.kanban_task_events import needs_observation
         with self.connect() as db:
             records = [json.loads(row[0]) for row in db.execute("SELECT record FROM requests ORDER BY rowid")]
-        return [r for r in records if r["status"] in {"queued", "generated", "waiting_children"}]
+        return [r for r in records if r["status"] in {"queued", "generated", "waiting_children"}
+                or needs_observation(r)]
 
     def children(self, request_id):
         with self.connect() as db:
@@ -276,6 +278,9 @@ class HandoffService:
             return
         for record in await asyncio.to_thread(self.journal.pending):
             try:
+                await self.observe_task_phase(record['request_id'])
+                if record['status'] not in {'queued', 'generated', 'waiting_children'}:
+                    continue  # Projection retry is never permission to re-execute a terminal request.
                 if record["status"] == "queued" and time.time() - record["created_at"] > 900:
                     await asyncio.to_thread(self.journal.update, record["request_id"], status="failed", error="queued_expired")
                     continue
@@ -298,6 +303,15 @@ class HandoffService:
                 current = await asyncio.to_thread(self.journal.get, record["request_id"])
                 status = "ambiguous" if current["status"] in {"running", "returning"} else "failed"
                 await asyncio.to_thread(self.journal.update, record["request_id"], status=status, error=type(exc).__name__)
+            finally:
+                await self.observe_task_phase(record['request_id'])
+
+    async def observe_task_phase(self, request_id):
+        from gateway.kanban_task_events import publish_phase
+        try:
+            await asyncio.to_thread(publish_phase, self, request_id)
+        except (PermissionError, OSError, ValueError, sqlite3.Error):
+            logger.warning('Native Kanban phase observation deferred: request_id=%s', request_id, exc_info=True)
 
     async def execute(self, record, target, *, receiving_turn=None):
         request_id = record["request_id"]
@@ -310,8 +324,10 @@ class HandoffService:
             return await asyncio.to_thread(self.journal.update, request_id, **outcome)
         if not outcome["generated"] or not outcome["delivered"]:
             return await asyncio.to_thread(self.journal.update, request_id, status="failed", error="no successful native model/delivery receipt")
-        return await asyncio.to_thread(self.journal.update, request_id, status="generated", response=outcome["response"],
-                                       target_message_ids=outcome.get("message_ids", []))
+        generated = await asyncio.to_thread(self.journal.update, request_id, status="generated", response=outcome["response"],
+                                            target_message_ids=outcome.get("message_ids", []))
+        await self.observe_task_phase(request_id)
+        return generated
 
     async def native_turn(self, record, target, prompt, key, sid, *, phase="request", receiving_turn=None):
         """One admitted native model turn; callers own the durable phase transition."""

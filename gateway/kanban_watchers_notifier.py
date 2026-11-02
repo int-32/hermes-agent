@@ -44,7 +44,7 @@ def _pin_first():
 # "status" covers dashboard drag-drop and `_set_status_direct()`.
 # ``review_requested`` wakes the origin like a block but is not one;
 # the task is not archived so later review cycles keep notifying.
-TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested")
+TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "native_source_bound", "native_task_observed")
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
 _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected")
@@ -56,7 +56,17 @@ def diagnostic_event(ev) -> bool:
         return True
     if ev.kind in {"blocked", "block_loop_detected"}:
         return (ev.payload or {}).get("kind") != "needs_input"
+    if ev.kind == 'native_task_observed':
+        return (ev.payload or {}).get('event', {}).get('kind') in {'failed', 'idle'}
     return ev.kind == "status" and (ev.payload or {}).get("status") in {"blocked", "triage"}
+
+
+def _wake_kind(ev):
+    if ev.kind == 'native_task_observed':
+        kind = (ev.payload or {}).get('event', {}).get('kind')
+        return {'failed': 'blocked', 'blocked': 'blocked', 'completed': 'review_requested',
+                'review': 'review_requested'}.get(kind)
+    return ev.kind if ev.kind in _WAKE_KINDS else None
 # Consecutive send failures (adapter raised OR reported SendResult(success=False))
 # before a sub is dropped as a dead chat. 12 ≈ 60s at the 5s cadence: a transient
 # API outage must not permanently unsubscribe a live review-gate channel.
@@ -466,6 +476,13 @@ def _fmt_timed_out(ev, n) -> tuple:
     return t("gateway.kanban.ping.timed_out", head=n.head, span=span), None, None
 
 
+def _fmt_native_observed(ev, n) -> tuple:
+    event = (ev.payload or {}).get('event', {})
+    summary = _safe_review_reason(event.get('summary'))
+    state = (ev.payload or {}).get('external_state', 'unknown')
+    return t('gateway.kanban.ping.status', head=n.head, status=f'{state}: {summary}'), summary, None
+
+
 # archived / unblocked are claimed (so the cursor advances past them) but
 # intentionally silent (no formatter), and excluded from _WAKE_KINDS so they
 # never wake the creator.
@@ -482,6 +499,9 @@ _EVENT_FORMATTERS: dict[str, Callable[[Any, _KanbanNotification], tuple]] = {
     "review_requested": _fmt_review_requested,
     "changes_requested": _fmt_changes_requested,
     "block_loop_detected": _fmt_block_loop_detected,
+    'native_task_observed': _fmt_native_observed,
+    'native_source_bound': lambda ev, n: (
+        t('gateway.kanban.ping.status', head=n.head, status='registered'), None, None),
 }
 
 
@@ -574,8 +594,8 @@ class _KanbanNotification:
     def build_wake_text(self) -> None:
         """Set ``wake_kinds`` / ``session_key`` / ``synth`` for the wake paths."""
         task, sub = self.task, self.sub
-        self.wake_kinds = {ev.kind for ev in self.d["events"] if ev.kind in _WAKE_KINDS} if self.wake_agent else set()
-        self.wake_diagnostic = all(diagnostic_event(ev) for ev in self.d["events"] if ev.kind in self.wake_kinds)
+        self.wake_kinds = {kind for ev in self.d['events'] if (kind := _wake_kind(ev))} if self.wake_agent else set()
+        self.wake_diagnostic = all(diagnostic_event(ev) for ev in self.d['events'] if _wake_kind(ev))
         if not self.wake_kinds:
             return
         if self.is_push_adapter:

@@ -74,7 +74,8 @@ def execute(args):
         if args.command == 'accept':
             native_id = source_api.accept_task(conn, policy=policy, source=origin, session_key=args.source_key,
                 session_id=sid, profile_home=profile_home, task_id=args.task_id,
-                document_project=document['project'], project_id=project_id, title=args.title, native_id=args.native_id)
+                document_project=document['project'], project_id=project_id, title=args.title, native_id=args.native_id,
+                subscribe=(config.get('kanban') or {}).get('auto_subscribe_on_create', True) is True)
         else:
             native_id = spec['native_id']
         if args.event:

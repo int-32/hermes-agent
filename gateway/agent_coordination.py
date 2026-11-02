@@ -196,6 +196,7 @@ async def submit_document(service, source_key, source_sid, caller_home, request_
             "lineage": [*lineage, target_key],
             "task_binding": policy['tasks'][task_id],
         })
+    await service.observe_task_phase(request_id)
     return service.public(record)
 
 

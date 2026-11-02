@@ -88,8 +88,23 @@ def validate_source(policy, source, key):
         raise PermissionError('native task owner/guild/profile/parent refused')
 
 
+def _subscribe_source(conn, native_id, source):
+    from hermes_cli import kanban_db_notify as notify
+    profile = source.profile or 'default'
+    for sub in notify.list_notify_subs(conn):
+        if (sub['task_id'], sub['platform'], sub['chat_id'], sub['thread_id']) == (
+                native_id, source.platform.value, source.chat_id, source.thread_id or ''):
+            if sub.get('notifier_profile') not in (None, '', profile):
+                raise PermissionError('native source subscription belongs to another profile')
+    notify.add_notify_sub(conn, task_id=native_id, platform=source.platform.value,
+                         chat_id=source.chat_id, thread_id=source.thread_id, user_id=source.user_id,
+                         chat_type=source.chat_type, notifier_profile=profile,
+                         delivery_metadata={'parent_chat_id': source.parent_chat_id,
+                                            'scope_id': source.scope_id})
+
+
 def accept_task(conn, *, policy, source, session_key, session_id, profile_home,
-                task_id, document_project, project_id, title=None, native_id=None):
+                task_id, document_project, project_id, title=None, native_id=None, subscribe=True):
     """Compose native card creation and provenance in ONE board writer transaction.
 
     Called after the local operator resolved an actual persisted native session.
@@ -120,6 +135,8 @@ def accept_task(conn, *, policy, source, session_key, session_id, profile_home,
             from gateway.agent_handoff import _continues
             if not _continues(profile_home, existing['session_id'], session_id):
                 raise PermissionError('native source session reset')
+            if subscribe:
+                _subscribe_source(conn, existing['native_id'], source)
             return existing['native_id']
         if any(s['session_key'] == session_key for s in index.values()):
             raise PermissionError('source already belongs to another task')
@@ -147,6 +164,8 @@ def accept_task(conn, *, policy, source, session_key, session_id, profile_home,
                                       idempotency_key=key, tenant=profile, session_id=session_id, completion_contract='local-only')
         else:
             native_id = card.id
+        if subscribe:
+            _subscribe_source(conn, native_id, source)
         kb._append_event(conn, native_id, SOURCE_EVENT, spec)
         if created:
             kb.observe_tracking_task(conn, native_id, 'running', actor='native-task-intake',
@@ -191,7 +210,7 @@ def observe_task(conn, native_id, event):
         raise ValueError('blocked requires an actual user action')
     observation = dict(external_state=STATES[kind], goal_status='unverified',
                        revision=event['revision'], input_digest=digest(event), event=event)
-    with kb.write_txn(conn):
+    with kb.write_txn(conn, allow_nested=True):
         spec = next((s for s in source_index(conn).values() if s['native_id'] == native_id), None)
         if not spec or spec['task_id'] != event['task_id']:
             raise PermissionError('native task source missing')

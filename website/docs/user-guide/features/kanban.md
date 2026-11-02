@@ -1133,6 +1133,34 @@ Built-in decomposition also inherits its root's durable session. Session lineage
 
 A chat-originated auto-subscribe is created in `notify+wake` mode: on a terminal event the destination agent both receives the passive message **and** takes a real turn, so it can read the board context and reply in its own voice. See [Delivery modes](#delivery-modes) below.
 
+### Native task sources and dependency events
+
+`hermes kanban source accept` resolves a persisted native conversation before
+creating or reusing its tracking-only card. Acceptance also subscribes that exact
+conversation in the same board transaction, including its owning profile and
+thread routing anchors. New subscriptions are passive `notify` subscriptions;
+an existing delivery mode and event cursor are preserved. The operator's existing
+`kanban.auto_subscribe_on_create: false` setting disables this automatic subscription.
+
+Accepted native document coordination requests now write their committed queued,
+generated, waiting-for-dependencies and final phases to that same card. The gateway
+calls the existing source observation writer directly; no per-phase CLI command or
+model scan is required. A durable journal marker retries a missed observation
+through the existing handoff loop, and the card's producer event key prevents a
+lost marker acknowledgement from duplicating the event. A terminal projection
+retry never re-executes the request. Legacy requests without a trusted card binding
+do not acquire one through this observer.
+
+The existing notifier consumes `native_source_bound` and `native_task_observed`
+alongside its original task events, using its normal durable notification cursor.
+Registration and ordinary progress do not wake an agent. An explicitly enabled
+`wake` or `notify+wake` subscription may wake for review or failure; a completed
+dependency requests review rather than accepting the whole task. These observations
+preserve manual card decisions and never create a native run or bypass
+tracking-only policy. Arbitrary chat, HWB idle state and unregistered external
+executors are not event producers for this path. The dashboard's existing event
+WebSocket sees the same append-only events.
+
 ### Output truncation in messaging
 
 Gateway platforms have practical message-length caps. If `/kanban list`, `/kanban show`, or `/kanban tail` produce more than ~3800 characters of output, the response is truncated with a `… (truncated; use \`hermes kanban …\` in your terminal for full output)` footer. The CLI surface has no such cap.
