@@ -99,7 +99,7 @@ class HandoffJournal:
                 "request_id", "message", "source_key", "caller_home", "target_key",
                 "kind", "source_endpoint", "target_endpoint", "source_profile", "target_profile", "lineage"))
             same_task = same_task and all(existing.get(k) == record.get(k) for k in (
-                "protocol", "parent_request_id", "root_request_id", "producer_admission_id", "stage_after_request_id"))
+                "protocol", "parent_request_id", "root_request_id", "producer_admission_id", "stage_after_request_id", "work_task_binding"))
             if not same_task or _route_anchor(existing.get("origin")) != _route_anchor(record.get("origin")):
                 raise ValueError("request_id reused with a different origin or message")
             return existing
@@ -467,3 +467,8 @@ def complete_coordination(request_id, outcome, session_id):
 
 def continue_coordination(request_id, handoff_path, session_id):
     return _bound_request(session_id, coordination=True, completion="next_stage", args=(request_id, handoff_path))
+
+
+def initialize_coordination_task(request_id, work_task_id, thread_id, session_id):
+    return _bound_request(session_id, coordination=True, completion="initialize_task",
+                          args=(request_id, work_task_id, thread_id))

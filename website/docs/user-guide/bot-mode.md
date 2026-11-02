@@ -517,6 +517,35 @@ and acceptance. A return is a bounded receipt along the existing edge, not a new
 to an ancestor. Each work request permits at most four child dispatches. Child requests
 retain the parent's task/project, root request ID and native route binding.
 
+A receiving **peer main** can initialize a separate work task without a new human
+message. In that private request turn, call
+`coordinate_session(action="initialize_task", request_id="<stable-child-id>",
+work_task_id="<stable-work-id>", thread_id="<existing-native-thread-id>")`.
+The native adapter resolves the thread's guild and parent, and normal routing and
+owner authorization must select this main's profile. No supplied SID, profile,
+parent, business task, document or root is accepted. The gateway creates a real
+SessionStore entry and accepts a separate tracking-only card, assigned to this
+profile. The original business source remains bound to its original task.
+
+The work card's immutable `work_for` points to the business source. The child keeps
+the receiving request's exact business document/version, parent and root; its
+`work_task_binding` and prompt `execution_task` identify the separate execution
+lane. Native child progress projects onto that work card; parent progress stays
+with the business card. The first action uses the existing private native dispatch
+and completion path, returning through the receiving main and originating main.
+`queued` does not mean executed. Repeating the same initialization reuses the
+card/session and deduplicates the same child request. Reuse the same work ID for
+the same operational goal across phases. Different goals require explicit work IDs.
+
+An existing unrelated session is never adopted. A crash between session reservation,
+card acceptance and queue insertion can leave an inert partial allocation; inspect
+that state instead of inventing a replacement SID or blindly replaying unknown
+execution. Paused/closed work cannot start a queued request; an already generated
+private result may still settle. Source resets, changed bindings and ancestor loops
+retain the ordinary refusal and recovery rules. This action does not create a
+Discord thread, enable a dispatcher worker, change configuration, or authorize
+spending, sending messages or asset operations.
+
 Before a receiving or continuation turn finishes, it calls
 `coordinate_session(action="complete", request_id="<work_request_id>", outcome="completed")`.
 Use `blocked` or `failed` instead when appropriate. This action requires the gateway's

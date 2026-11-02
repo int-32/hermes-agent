@@ -27,8 +27,8 @@ def publish_phase(service, request_id):
         record = service.journal.get(request_id)
         if not record or not needs_observation(record):
             return
-        binding = record['task_binding']
-        task_id = record['document']['task_id']
+        binding = record.get('work_task_binding') or record['task_binding']
+        task_id = binding['task_id']
         with kbc.connect_closing(db_path=board_path(service.home)) as conn, kb.write_txn(conn):
             current = source_index(conn).get(task_id)
             if not current or any(current.get(k) != v for k, v in binding.items() if k != 'admissible'):

@@ -149,7 +149,7 @@ async def native_endpoint(service, policy, name, *, accepted_sid=None):
     return source, effective_sid
 
 
-async def submit_document(service, source_key, source_sid, caller_home, request_id, task_id, path, target):
+async def submit_document(service, source_key, source_sid, caller_home, request_id, task_id, path, target, *, work_task_id=None):
     from gateway.agent_handoff import _continues, _same_home, validate_request
     if not all(isinstance(value, str) and value for value in (request_id, task_id, path, target)):
         raise ValueError("request requires request_id, task_id, handoff_path and target strings")
@@ -159,7 +159,9 @@ async def submit_document(service, source_key, source_sid, caller_home, request_
     from hermes_cli.kanban_task_source import project_exists
     project_exists(service.home, policy['tasks'][task_id]['project_id'])
     caller = caller_endpoint(policy, source_key)
-    destination = target_endpoint(policy, caller, target, task_id)
+    from gateway.coordination_task_bootstrap import dispatch_binding
+    work = dispatch_binding(service, policy, source_key, task_id, path, work_task_id)
+    destination = target_endpoint(policy, caller, target, work_task_id or task_id)
     source, actual_sid = await native_endpoint(service, policy, caller)
     target_source, target_sid = await native_endpoint(service, policy, destination)
     source_home = service.runner._resolve_profile_home_for_source(source)
@@ -172,6 +174,8 @@ async def submit_document(service, source_key, source_sid, caller_home, request_
     if lineage[-1] != source_key or target_key in lineage or len(lineage) >= 4:
         raise PermissionError("recursive coordination loop refused")
     document = await asyncio.to_thread(document_pointer, policy, task_id, path)
+    from gateway.coordination_task_bootstrap import validate_work_document
+    validate_work_document(service, policy, source_key, document, work_task_id)
     if policy['tasks'][task_id]['project'] != document['project']:
         raise PermissionError('document belongs to a different task project')
     for name in (caller, destination):
@@ -187,7 +191,7 @@ async def submit_document(service, source_key, source_sid, caller_home, request_
         from gateway.plugin_cron_watch import dispatch_association
         association.update(dispatch_association(service, source_key, task_id, destination))
         record = await asyncio.to_thread(service.journal.enqueue, {
-            "protocol": 2, "root_request_id": request_id, **association,
+            "protocol": 2, "root_request_id": request_id, **association, **work,
             "kind": "coordination", "request_id": request_id, "message": message, "document": document,
             "source_key": source_key, "source_sid": source_sid, "caller_home": str(caller_home),
             "source_endpoint": caller, "target_endpoint": destination, "source_profile": source.profile or "default",
@@ -203,6 +207,8 @@ async def submit_document(service, source_key, source_sid, caller_home, request_
 def record_policy(service, record):
     """Old queued/returning receipts keep pinned endpoints, not old task lists."""
     policy = coordination_policy(service)
+    from gateway.coordination_task_bootstrap import validate_record
+    validate_record(service, policy, record)
     pinned = record.get('task_binding')
     current = policy['tasks'].get(record['document']['task_id'])
     if record['status'] == 'queued':
@@ -251,7 +257,8 @@ async def pinned_document_routes(service, record):
     caller = caller_endpoint(policy, record["source_key"])
     alias = "peer" if record["target_endpoint"].startswith("main:") and caller.startswith("main:") else (
         "main" if caller.startswith("task:") else record["target_endpoint"])
-    if target_endpoint(policy, caller, alias, record["document"]["task_id"]) != record["target_endpoint"]:
+    from gateway.coordination_task_bootstrap import edge_task_id
+    if target_endpoint(policy, caller, alias, edge_task_id(record)) != record["target_endpoint"]:
         raise PermissionError("pinned edge no longer allowed")
     for name in (caller, record["target_endpoint"]):
         spec = endpoint(policy, name)
@@ -285,6 +292,8 @@ def handoff_prompt(service, record):
                 "target_profile": target_profile}
     if record.get("kind") == "coordination":
         from gateway.coordination_receipts import ASSET_RULE
+        from gateway.coordination_task_bootstrap import work_attribution
+        envelope.update(work_attribution(record))
         envelope.update(record["document"], target_endpoint=record["target_endpoint"],
                         return_session=record["source_key"], origin_chat=record["origin"]["chat_id"],
                         origin_thread=record["origin"].get("thread_id"))

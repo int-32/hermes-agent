@@ -227,6 +227,9 @@ async def verify_current_source(service, key, sid, home, current):
 
 async def native_request(service, key, sid, home, current, coordination, completion, args):
     await verify_current_source(service, key, sid, home, current)
+    if completion == "initialize_task":
+        from gateway.coordination_task_bootstrap import initialize_task
+        return await initialize_task(service, key, sid, home, *args)
     if completion == "next_stage":
         from gateway.coordination_stages import next_stage
         return await next_stage(service, key, sid, home, *args)

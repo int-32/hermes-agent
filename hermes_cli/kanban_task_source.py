@@ -1,6 +1,6 @@
 """Native card provenance. One card event replaces external task admission lists.
 
-Only the local operator entry writes this event, resolving the platform store;
+The local operator entry and private receiving-main initializer resolve the platform store;
 card bodies, comments and producer SID strings are never credential inputs.
 """
 from __future__ import annotations
@@ -104,7 +104,7 @@ def _subscribe_source(conn, native_id, source):
 
 
 def accept_task(conn, *, policy, source, session_key, session_id, profile_home,
-                task_id, document_project, project_id, title=None, native_id=None, subscribe=True):
+                task_id, document_project, project_id, title=None, native_id=None, subscribe=True, work_for=None, assignee=None):
     """Compose native card creation and provenance in ONE board writer transaction.
 
     Called after the local operator resolved an actual persisted native session.
@@ -123,6 +123,8 @@ def accept_task(conn, *, policy, source, session_key, session_id, profile_home,
     spec = dict(task_id=task_id, profile=profile, session_key=session_key, session_id=session_id,
                 profile_home=str(Path(profile_home).resolve()), origin=source.to_dict(),
                 document_project=document_project, project_id=project_id)
+    if work_for is not None:
+        spec["work_for"] = work_for
     with kb.write_txn(conn):
         index = source_index(conn)
         existing = index.get(task_id)
@@ -160,7 +162,7 @@ def accept_task(conn, *, policy, source, session_key, session_id, profile_home,
         created = card is None
         if created:
             native_id = kb.create_task(conn, title=title, board=BOARD, initial_status='blocked',
-                                      project_id=project_id, created_by='native-task-intake',
+                                      project_id=project_id, assignee=assignee, created_by='native-task-intake',
                                       idempotency_key=key, tenant=profile, session_id=session_id, completion_contract='local-only')
         else:
             native_id = card.id

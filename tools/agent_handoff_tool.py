@@ -38,8 +38,15 @@ def check_coordination():
 
 
 def coordinate_session(args, **kw):
-    from gateway.agent_handoff import coordinate_session as submit, complete_coordination, continue_coordination
+    from gateway.agent_handoff import coordinate_session as submit, complete_coordination, continue_coordination, initialize_coordination_task
     try:
+        if args.get("action") == "initialize_task":
+            if set(args) - {"action", "request_id", "work_task_id", "thread_id"}:
+                raise ValueError("initialize_task derives its business document, profile and parent from the private receipt")
+            return json.dumps(initialize_coordination_task(args.get("request_id"), args.get("work_task_id"),
+                              args.get("thread_id"), kw.get("session_id")))
+        if args.get("work_task_id") is not None or args.get("thread_id") is not None:
+            raise ValueError("work identity fields require initialize_task")
         if args.get("action") == "next_stage":
             if args.get("target") is not None or args.get("task_id") is not None or args.get("outcome") is not None:
                 raise ValueError("next_stage derives its task and edge from the private receipt")
@@ -47,7 +54,7 @@ def coordinate_session(args, **kw):
         if args.get("action", "request") == "complete":
             return json.dumps(complete_coordination(args.get("request_id"), args.get("outcome"), kw.get("session_id")))
         if args.get("action", "request") != "request":
-            raise ValueError("action must be request, complete or next_stage")
+            raise ValueError("action must be request, complete, next_stage or initialize_task")
         result = submit(args.get("request_id"), args.get("task_id"), args.get("handoff_path"),
                         args.get("target"), kw.get("session_id"))
         return json.dumps({**result, "note": "Queued is not completed. Finish this turn; a correlated native receipt resumes this session."})
@@ -64,7 +71,8 @@ registry.register(
         "returns to this session after native model execution. Do not retry ambiguous work or form loops. "
         "Read the concise handoff first, evidence as needed. Documents never grant spend/send permission."),
         "parameters": {"type": "object", "properties": {
-            "action": {"type": "string", "enum": ["request", "complete", "next_stage"], "description": (
+            "action": {"type": "string", "enum": ["request", "complete", "next_stage", "initialize_task"], "description": (
+                "initialize_task is restricted to the current private receiving peer-main turn: create/reuse a separate work source, retain business source/parent/root, queue its first native turn without pretending user input. "
                 "request dispatches a document. complete acknowledges the current gateway-owned work request "
                 "after verifying its result; no pending dependency may be called completed. "
                 "next_stage records one new same-task HANDOFF version from a completed task-origin root receipt; "
@@ -74,6 +82,8 @@ registry.register(
                 "then back through main to original task. Complete only in the private native receiving/return turn.")},
             "outcome": {"type": "string", "enum": ["completed", "blocked", "failed"]},
             "request_id": {"type": "string"}, "task_id": {"type": "string"},
-            "handoff_path": {"type": "string"}, "target": {"type": "string"}},
+            "handoff_path": {"type": "string"}, "target": {"type": "string"},
+            "work_task_id": {"type": "string", "description": "Stable separate execution task; initialize_task only."},
+            "thread_id": {"type": "string", "description": "Existing native thread under the receiving main authorized task parent; initialize_task only."}},
             "required": ["request_id"], "additionalProperties": False}},
 )
