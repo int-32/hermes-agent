@@ -98,6 +98,7 @@ async def test_real_native_request_phases_reach_original_subscription_without_ob
     assert service.journal.get('event-chain-001')['status'] == 'delivered'
     events = phase_events(tid)
     assert [e.payload['event']['request_status'] for e in events] == ['queued', 'generated', 'delivered']
+    assert events[-1].payload['event']['kind'] == 'progress'
     assert all(e.payload['goal_status'] == 'unverified' for e in events)
     native_turns = len(service.runner.received)
     await submit_document(*args)
@@ -119,6 +120,7 @@ async def test_real_native_request_phases_reach_original_subscription_without_ob
         assert kb.board_tracking_only(conn)
         assert kb.list_runs(conn, tid) == []
         assert kb.get_task(conn, tid).completed_at is None
+        assert kb.get_task(conn, tid).status == 'running'
         assert len(read_sources(service.home)) == 2
     record_testsuite_property('native_event_connection', json.dumps({
         'card': tid, 'task_id': 'task-one', 'original_thread': 'default-task',

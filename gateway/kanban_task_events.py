@@ -9,7 +9,7 @@ import json
 
 
 PHASE_KINDS = {'queued': 'progress', 'generated': 'progress', 'waiting_children': 'progress',
-               'delivered': 'review', 'failed': 'failed', 'ambiguous': 'failed', 'blocked': 'failed'}
+               'delivered': 'progress', 'failed': 'failed', 'ambiguous': 'failed', 'blocked': 'failed'}
 
 
 def needs_observation(record):

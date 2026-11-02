@@ -1153,9 +1153,9 @@ do not acquire one through this observer.
 
 The existing notifier consumes `native_source_bound` and `native_task_observed`
 alongside its original task events, using its normal durable notification cursor.
-Registration and ordinary progress do not wake an agent. An explicitly enabled
-`wake` or `notify+wake` subscription may wake for review or failure; a completed
-dependency requests review rather than accepting the whole task. These observations
+Registration, ordinary progress and successful dependency delivery do not wake an
+agent or move the task into review. An explicitly enabled `wake` or `notify+wake`
+subscription may wake for an explicit task review or failure event. These observations
 preserve manual card decisions and never create a native run or bypass
 tracking-only policy. Arbitrary chat, HWB idle state and unregistered external
 executors are not event producers for this path. The dashboard's existing event
