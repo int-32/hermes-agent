@@ -107,7 +107,8 @@ def accept_task(conn, *, policy, source, session_key, session_id, profile_home,
                 task_id, document_project, project_id, title=None, native_id=None, subscribe=True, work_for=None, assignee=None):
     """Compose native card creation and provenance in ONE board writer transaction.
 
-    Called after the local operator resolved an actual persisted native session.
+    Called by local operator intake or the private peer-main initializer, after
+    resolving an actual persisted native session. Neither accepts a supplied SID.
     There is no model-facing handler that accepts a binding or arbitrary SID.
     """
     from hermes_cli import kanban_db as kb

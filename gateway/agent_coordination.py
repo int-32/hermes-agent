@@ -149,7 +149,7 @@ async def native_endpoint(service, policy, name, *, accepted_sid=None):
     return source, effective_sid
 
 
-async def submit_document(service, source_key, source_sid, caller_home, request_id, task_id, path, target, *, work_task_id=None):
+async def submit_document(service, source_key, source_sid, caller_home, request_id, task_id, path, target, *, work_task_id=None, work_owner=None):
     from gateway.agent_handoff import _continues, _same_home, validate_request
     if not all(isinstance(value, str) and value for value in (request_id, task_id, path, target)):
         raise ValueError("request requires request_id, task_id, handoff_path and target strings")
@@ -186,6 +186,9 @@ async def submit_document(service, source_key, source_sid, caller_home, request_
     validate_request(request_id, message)
     caller_home = await asyncio.to_thread(Path(caller_home).resolve)
     from gateway.coordination_receipts import dispatch_context
+    def owner_guard(_db):
+        from gateway.coordination_task_bootstrap import initialization_owner
+        initialization_owner(service, work_owner)
     async with service.coordination_lock:
         association = dispatch_context(source_key, request_id)
         from gateway.plugin_cron_watch import dispatch_association
@@ -199,7 +202,7 @@ async def submit_document(service, source_key, source_sid, caller_home, request_
             "target": target_source.to_dict(), "target_sid": target_sid, "target_key": target_key,
             "lineage": [*lineage, target_key],
             "task_binding": policy['tasks'][task_id],
-        })
+        }, guard=owner_guard if work_task_id is not None else None)
     await service.observe_task_phase(request_id)
     return service.public(record)
 

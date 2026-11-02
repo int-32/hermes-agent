@@ -86,10 +86,15 @@ class HandoffJournal:
             row = db.execute("SELECT record FROM requests WHERE id=?", (request_id,)).fetchone()
         return json.loads(row[0]) if row else None
 
-    def enqueue(self, record):
-        with self.connect() as db:
+    def enqueue(self, record, *, guard=None):
+        with _HANDOFF_OWNER_LOCK, self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            return self._enqueue(db, record)
+            if guard:
+                guard(db)
+            queued = self._enqueue(db, record)
+            if guard:
+                guard(db)
+            return queued
 
     def _enqueue(self, db, record):
         row = db.execute("SELECT record FROM requests WHERE id=?", (record["request_id"],)).fetchone()
@@ -445,6 +450,9 @@ def _bound_request(session_id, *, coordination=False, completion=False, args=())
     home = _SESSION_NATIVE_HOME.get()
     if home is None or not _same_home(home, get_hermes_home()):
         raise PermissionError('requires a bound native gateway model turn in its own profile home')
+    if completion == "initialize_task":
+        with _HANDOFF_OWNER_LOCK:
+            args = (*args, completion_owner(service))
     loop = service.runner._gateway_loop
     from gateway.native_endpoint import native_request
     operation = native_request(service, _SESSION_KEY.get(), session_id, home, _SESSION_NATIVE_SOURCE.get(),

@@ -58,15 +58,21 @@ async def thread_source(service, policy, caller, thread_id):
     return source, key
 
 
-def _reserve_work(service, policy, caller, turn, source, key, work_task_id):
-    from gateway.agent_handoff import completion_owner, _HANDOFF_OWNER_LOCK
+def initialization_owner(service, owner):
+    from gateway.agent_handoff import completion_owner
+    if completion_owner(service) is not owner:
+        raise PermissionError('work initialization runtime owner changed')
+
+
+def _reserve_work(service, policy, caller, turn, source, key, work_task_id, owner):
+    from gateway.agent_handoff import _HANDOFF_OWNER_LOCK
     from gateway.native_session_identity import validate_native_session
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli.kanban_task_source import accept_task, board_path
     runner = service.runner
     home = runner._resolve_profile_home_for_source(source)
     with _HANDOFF_OWNER_LOCK:
-        completion_owner(service)
+        initialization_owner(service, owner)
         receiving_main(service, policy, turn.key)
         # An unrelated existing route is not adopted; a failed partial allocation
         # remains inert and requires explicit inspection rather than a new SID.
@@ -85,14 +91,16 @@ def _reserve_work(service, policy, caller, turn, source, key, work_task_id):
         return native_id
 
 
-async def initialize_task(service, key, sid, home, request_id, work_task_id, thread_id):
+async def initialize_task(service, key, sid, home, request_id, work_task_id, thread_id, owner):
     from gateway.agent_coordination import coordination_policy, document_pointer, native_endpoint, submit_document
     from hermes_cli.kanban_task_source import project_exists
     if (not isinstance(work_task_id, str) or re.fullmatch(r'[A-Za-z0-9_-]{1,80}', work_task_id) is None
             or not isinstance(thread_id, str) or re.fullmatch(r'[1-9][0-9]{0,23}', thread_id) is None):
         raise ValueError('stable work_task_id and native thread_id required')
-    from gateway.agent_handoff import validate_request
+    from gateway.agent_handoff import validate_request, _HANDOFF_OWNER_LOCK
     validate_request(request_id, 'internal task initialization')
+    with _HANDOFF_OWNER_LOCK:
+        initialization_owner(service, owner)
     async with service.coordination_lock:
         policy = coordination_policy(service)
         caller, turn = receiving_main(service, policy, key)
@@ -121,11 +129,11 @@ async def initialize_task(service, key, sid, home, request_id, work_task_id, thr
             if any(t['session_key'] == target_key for t in policy['tasks'].values()):
                 raise PermissionError('work thread already belongs to another task source')
             native_id = await asyncio.to_thread(_reserve_work, service, policy, caller, turn, source,
-                                                target_key, work_task_id)
+                                                target_key, work_task_id, owner)
     # The ordinary writer binds parent/root to the actual receiving turn. Its
     # existing same-business-document guard is retained, not bypassed by a new root.
     result = await submit_document(service, key, sid, home, request_id, document['task_id'],
-                                    document['path'], 'task:' + work_task_id, work_task_id=work_task_id)
+                                    document['path'], 'task:' + work_task_id, work_task_id=work_task_id, work_owner=owner)
     return dict(result, initialized=True, work_task_id=work_task_id, native_id=native_id)
 
 
