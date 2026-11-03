@@ -19,10 +19,11 @@ _TASK_DICT_FIELDS = (
     "created_by", "created_at", "started_at", "completed_at", "result",
     "skills", "max_runtime_seconds", "max_retries", "model_override", "provider_override",
     "session_id", "workflow_template_id", "current_step_key", "completion_contract", "last_failure_error",
+    "current_run_id", "last_heartbeat_at",
 )
 _SHOW_RUN_FIELDS = (
     "id", "profile", "step_key", "status", "outcome", "summary", "error",
-    "metadata", "worker_pid", "started_at", "ended_at",
+    "metadata", "worker_pid", "started_at", "ended_at", "last_heartbeat_at",
 )
 _RUNS_RUN_FIELDS = (
     "id", "profile", "status", "outcome", "started_at", "ended_at",
