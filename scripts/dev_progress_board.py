@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import argparse
 import collections
+import copy
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -306,10 +308,37 @@ class Discord:
         self.threads = set()
         self.operations = collections.Counter()
         self.thread_states = {}
+        self.connection = None
+        self.read_cache = {}  # One run's GET results; a run holds sync.lock and is the only writer.
         channel = self.request("GET", f"/channels/{self.channel_id}")
         if channel.get("id") != self.channel_id or channel.get("guild_id") != self.guild_id or channel.get("type") != 0:
             raise RuntimeError("目标频道/guild不符，停止同步")
         self.bot = self.request("GET", "/users/@me")["id"]
+
+    def connect(self):
+        proxy = urllib.request.getproxies().get("https")
+        if not proxy or urllib.request.proxy_bypass("discord.com"):
+            return http.client.HTTPSConnection("discord.com", timeout=20)
+        parsed = urllib.parse.urlsplit(proxy)
+        connection = http.client.HTTPSConnection(parsed.hostname, parsed.port, timeout=20)
+        connection.set_tunnel("discord.com", 443)
+        return connection
+
+    def close_connection(self):
+        if self.connection is not None:
+            self.connection.close()
+            self.connection = None
+
+    def send(self, method, path, data, headers):
+        """One request on a reused connection: a fresh proxy tunnel per request costs about 1.5s."""
+        if self.connection is None:
+            self.connection = self.connect()
+        self.connection.request(method, "/api/v10" + path, body=data, headers=headers)
+        response = self.connection.getresponse()
+        raw = response.read(4 * 1024 * 1024)
+        if response.will_close:
+            self.close_connection()
+        return response.status, raw
 
     def request(self, method, path, body=None):
         if path not in {"/users/@me", f"/guilds/{self.guild_id}/threads/active"}:
@@ -318,32 +347,39 @@ class Discord:
                 raise RuntimeError("拒绝访问授权频道以外的目标")
         elif method != "GET":
             raise RuntimeError("身份及用于恢复的thread目录仅可读取")
+        if method == "GET" and path in self.read_cache:
+            self.operations["GET_cached"] += 1
+            return copy.deepcopy(self.read_cache[path])
+        if method != "GET":
+            self.read_cache.clear()  # Any write can change what later checks must re-read.
         data = None if body is None else json.dumps(body).encode()
-        req = urllib.request.Request("https://discord.com/api/v10" + path, data=data, method=method,
-                                     headers={"Authorization": "Bot " + self.token,
-                                              "Content-Type": "application/json",
-                                              "User-Agent": "Hermes-HWB-Progress-Board/1.0"})
+        headers = {"Authorization": "Bot " + self.token, "Content-Type": "application/json",
+                   "User-Agent": "Hermes-HWB-Progress-Board/1.0"}
         for attempt in range(4):
             try:
-                with urllib.request.urlopen(req, timeout=20) as response:
-                    raw = response.read(4 * 1024 * 1024)
-                    self.operations[method] += 1
-                    return json.loads(raw) if raw else {}
-            except urllib.error.HTTPError as exc:
-                if exc.code == 404 and method in {"GET", "DELETE"}:
-                    return None
-                if exc.code == 429:
-                    retry = json.loads(exc.read()).get("retry_after", 2)
-                    time.sleep(min(max(float(retry), 1), 30))
-                elif exc.code >= 500 and method != "POST":
-                    time.sleep(2 ** attempt)
-                else:
-                    raise DiscordError(exc.code) from None
-            except (urllib.error.URLError, TimeoutError, OSError):
+                status, raw = self.send(method, path, data, headers)
+            except (http.client.HTTPException, OSError):
+                self.close_connection()
                 # Ambiguous POSTs must recover from markers/anchored thread before resending.
                 if method == "POST":
                     raise RuntimeError("Discord写入结果未知，下次按标记恢复") from None
                 time.sleep(2 ** attempt)
+                continue
+            if status < 400:
+                self.operations[method] += 1
+                result = json.loads(raw) if raw else {}
+                if method == "GET":
+                    self.read_cache[path] = copy.deepcopy(result)
+                return result
+            if status == 404 and method in {"GET", "DELETE"}:
+                return None
+            if status == 429:
+                retry = json.loads(raw).get("retry_after", 2)
+                time.sleep(min(max(float(retry), 1), 30))
+            elif status >= 500 and method != "POST":
+                time.sleep(2 ** attempt)
+            else:
+                raise DiscordError(status) from None
         raise RuntimeError("Discord重试耗尽，下次cron继续")
 
     def history(self, channel):

@@ -877,7 +877,7 @@ class BoardTests(unittest.TestCase):
         api = board.Discord.__new__(board.Discord)
         api.guild_id, api.channel_id = TEST_GUILD, TEST_CHANNEL
         api.threads = set()
-        with patch.object(board.urllib.request, "urlopen") as network:
+        with patch.object(board.Discord, "send") as network:
             with self.assertRaises(RuntimeError):
                 api.request("POST", "/channels/999/messages", {"content": "test"})
             network.assert_not_called()
@@ -902,7 +902,7 @@ class BoardTests(unittest.TestCase):
                    "100000000000000001/threads", "100000000000000001,100000000000000002", str(2**64)]
         for value in invalid:
             for guild, channel in ((value, TEST_CHANNEL), (TEST_GUILD, value), (TEST_GUILD, TEST_GUILD)):
-                with self.subTest(guild=guild, channel=channel), patch.object(board.urllib.request, "urlopen") as network:
+                with self.subTest(guild=guild, channel=channel), patch.object(board.Discord, "send") as network:
                     with self.assertRaises(ValueError):
                         board.Discord("synthetic-token", guild, channel)
                     network.assert_not_called()
@@ -984,7 +984,7 @@ class BoardTests(unittest.TestCase):
         paths = [("POST", "/channels/100000000000000003/messages"),
                  ("GET", "/guilds/100000000000000004/threads/active"),
                  ("POST", f"/guilds/{TEST_GUILD}/threads/active"), ("PATCH", "/users/@me")]
-        with patch.object(board.urllib.request, "urlopen") as network:
+        with patch.object(board.Discord, "send") as network:
             for method, path in paths:
                 with self.subTest(method=method, path=path), self.assertRaises(RuntimeError):
                     api.request(method, path, {"content": "must not send"})
@@ -1037,7 +1037,7 @@ class BoardTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 api.thread(remote["id"], "untrusted")
         self.assertNotIn(remote["id"], api.threads)
-        with patch.object(board.urllib.request, "urlopen") as network:
+        with patch.object(board.Discord, "send") as network:
             with self.assertRaises(RuntimeError):
                 api.request("POST", f"/channels/{remote['id']}/messages", {"content": "must not send"})
             network.assert_not_called()
