@@ -23,6 +23,10 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Asia/Shanghai")
+# Unchanged tasks skip their remote round-trips; this many of them (least recently verified
+# first) are still fully re-verified each run, so every invariant check keeps running in rotation
+# without one run having to re-read every thread.
+VERIFY_PER_RUN = 10
 ACCEPTANCE = "开发完成：未核验｜合入主线：未核验｜上线验收：未核验"
 EVENT_NAMES = {"created": "任务已登记", "turn_start": "执行轮次开始",
                "message": "执行者有新反馈（内容未独立核验）", "tool": "工具调用记录已落盘",
@@ -628,12 +632,21 @@ class Board:
             entry["applied_control_head"] = head
         self.save()
 
-    def archive_closed(self, tasks):
+    def verify_set(self, tasks):
+        """Ids of the unchanged tasks this run still re-verifies against Discord."""
+        cache = self.state.get("sync_cache", {})
+        known = sorted((cache[t["id"]]["verified_at"], t["id"]) for t in tasks if t["id"] in cache)
+        return {tid for _, tid in known[:VERIFY_PER_RUN]}
+
+    def archive_closed(self, tasks, verify=None):
         for task in tasks:
             if not task.get("closed") or task["status"] not in {"已完成", "已取消"}:
                 continue
             entry = self.state["tasks"][task["id"]]
             if entry.get("applied_control_head") != task.get("control_head"):
+                continue
+            if (verify is not None and task["id"] not in verify
+                    and entry.get("archived_control_head") == task.get("control_head")):
                 continue
             thread = entry["thread_id"]
             if not self.api.is_archived(thread, refresh=True):
@@ -679,8 +692,17 @@ class Board:
             pool.validate_anchor(self.state)
             from dev_progress_pool_display import validate_remote_pool
             validate_remote_pool(self, pool)
+        verify = self.verify_set(tasks)
+        cache = self.state.setdefault("sync_cache", {})
         for task in tasks:
+            fingerprint = digest(task)
+            entry = self.state["tasks"].get(task["id"], {})
+            if (task["id"] not in verify and cache.get(task["id"], {}).get("fp") == fingerprint
+                    and entry.get("message_id") and not entry.get("sync_error")):
+                continue
             self.sync_task(task)
+            cache[task["id"]] = {"fp": fingerprint, "verified_at": time.time()}
+            self.save()
         targets = {tid: row for tid, row in self.state["tasks"].items() if row.get("card_channel_id")}
         prefix = ""
         if pool is not None:
@@ -690,7 +712,7 @@ class Board:
         summary = sync_overview(self, tasks, targets, pool, prefix)
         self.pin_overview(summary)
         self.remove_legacy_cards()
-        self.archive_closed(tasks)
+        self.archive_closed(tasks, verify)
         publish(self)
         self.state["layout_version"] = 2
         self.state["last_sync"] = datetime.now(TZ).isoformat()

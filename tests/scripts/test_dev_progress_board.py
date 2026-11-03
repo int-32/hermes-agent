@@ -312,6 +312,30 @@ class BoardTests(unittest.TestCase):
         self.assertEqual(set(self.api.messages), ids)
         self.assertTrue(self.api.archived)
 
+    def test_unchanged_tasks_skip_remote_reads_and_changed_task_still_syncs(self):
+        tasks = [dict(task(), id=f"任务-{n}") for n in range(3)]
+        board.Board(self.api, self.state).sync(tasks)
+        with patch.object(board, "VERIFY_PER_RUN", 0):
+            self.api.calls.clear()
+            board.Board(self.api, self.state).sync(tasks)
+            touched = {c[1] for c in self.api.calls}
+            card_ids = {row["message_id"] for row in json.loads(self.state.read_text())["tasks"].values()}
+            self.assertFalse(any(path.endswith("/" + mid) for path in touched for mid in card_ids))
+            posts = self.api.operations["POST"]
+            changed = [tasks[0] | {"status": "失败", "phase": "失败"}, *tasks[1:]]
+            board.Board(self.api, self.state).sync(changed)
+            self.assertGreater(self.api.operations["POST"], posts)
+
+    def test_rotation_reverifies_unchanged_tasks(self):
+        tasks = [dict(task(), id=f"任务-{n}") for n in range(3)]
+        board.Board(self.api, self.state).sync(tasks)
+        before = json.loads(self.state.read_text())["sync_cache"]
+        with patch.object(board, "VERIFY_PER_RUN", 1):
+            board.Board(self.api, self.state).sync(tasks)
+        after = json.loads(self.state.read_text())["sync_cache"]
+        refreshed = [tid for tid in after if after[tid]["verified_at"] != before[tid]["verified_at"]]
+        self.assertEqual(len(refreshed), 1)
+
     def test_archive_ack_loss_recovers_without_duplicate_milestone(self):
         board.Board(self.api, self.state).sync([task()])
         self.api.archive_ack_lost = True
