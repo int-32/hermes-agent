@@ -34,7 +34,7 @@ def board(tmp_path, monkeypatch):
     worker_argv = dispatch._worker_argv
     def harmless_argv(*args):
         argv = worker_argv(*args)
-        assert argv[:3] == [sys.executable, '-m', 'hermes_cli.kanban_worker_client']
+        assert argv[:4] == [sys.executable, '-P', '-m', 'hermes_cli.kanban_worker_client']
         return [str(worker), *argv[1:]]
     monkeypatch.setattr(dispatch, '_worker_argv', harmless_argv)
     kb.create_board("tracking")
@@ -73,4 +73,4 @@ def test_positive_control_real_default_spawn_on_ready_card(board):
     result = service.tick_once_for_board("tracking")
     assert [row[0] for row in result.spawned] == [tid]
     assert wait_until(marker.exists, timeout=10)
-    assert json.loads(marker.read_text())[1:] == ['-m', 'hermes_cli.kanban_worker_client']
+    assert json.loads(marker.read_text())[1:] == ['-P', '-m', 'hermes_cli.kanban_worker_client']

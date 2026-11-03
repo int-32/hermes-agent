@@ -79,6 +79,8 @@ agent:
     assert captured["env"]["HERMES_HOME"] == str(profile)
     assert captured["env"]["HERMES_KANBAN_TASK"] == "t_spawn_tools"
     assert captured["cmd"][-2:] == ["-m", "hermes_cli.kanban_worker_client"]
+    # A hermes-agent worktree as cwd must not shadow the installed hermes_cli.
+    assert "-P" in captured["cmd"][:-2]
     assert captured["env"]["HERMES_KANBAN_RUN_ID"] == "7"
     assert captured["env"]["HERMES_KANBAN_CLAIM_LOCK"] == "lock"
 
