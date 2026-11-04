@@ -13,6 +13,7 @@ import logging
 import os
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from agent.redact import redact_sensitive_text
@@ -659,6 +660,22 @@ def inject_new_comments_from_env(agent: Any) -> bool:
 
 # --- Handlers ---
 
+def _run_sessions(events) -> dict:
+    """``{run_id: {"session_id", "profile"}}`` from each run's latest ``owner_admitted``
+    event. ``profile`` names the store that holds the transcript (pass it to
+    ``session_search``): ``profiles/<name>/state.db`` is ``<name>``, the root store is
+    ``default``."""
+    out = {}
+    for e in events:
+        payload = e.payload or {}
+        if e.kind != "owner_admitted" or e.run_id is None or not payload.get("session_id"):
+            continue
+        db = Path(str(payload.get("db") or ""))
+        profile = db.parent.name if db.parent.parent.name == "profiles" else "default"
+        out[e.run_id] = {"session_id": payload["session_id"], "profile": profile}
+    return out
+
+
 @_kanban_handler("kanban_show")
 def _handle_show(args: dict, **kw) -> str:
     """Full task state: row, parents, children, comments, runs, last 50 events."""
@@ -676,6 +693,8 @@ def _handle_show(args: dict, **kw) -> str:
         })
     with _board(args.get("board")) as (kb, conn):
         task = _existing_task(kb, conn, tid)
+        events = kb.list_events(conn, tid)
+        sessions = _run_sessions(events)
         return json.dumps({
             "task": _fields(task, _TASK_FIELDS),
             "parents": kb.parent_ids(conn, tid),
@@ -686,8 +705,11 @@ def _handle_show(args: dict, **kw) -> str:
             "children": kb.child_ids(conn, tid),
             "comments": [_fields(c, _COMMENT_FIELDS) for c in kb.list_comments(conn, tid)],
             # Capped; full log via CLI.
-            "events": [_fields(e, _EVENT_FIELDS) for e in kb.list_events(conn, tid)[-50:]],
-            "runs": [_fields(r, _RUN_FIELDS) for r in kb.list_runs(conn, tid)],
+            "events": [_fields(e, _EVENT_FIELDS) for e in events[-50:]],
+            # Each run's owner session, read from the full event log so a long run's
+            # heartbeats cannot push it out of the capped window above.
+            "runs": [{**_fields(r, _RUN_FIELDS), "session": sessions.get(r.id)}
+                     for r in kb.list_runs(conn, tid)],
             # Same string build_worker_context hands the dispatcher at spawn time.
             "worker_context": kb.build_worker_context(conn, tid)})
 
