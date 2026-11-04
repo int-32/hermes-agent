@@ -5,8 +5,8 @@ reaped by anything: ``_cleanup_workspace`` preserved them by design, the CLI
 startup pruner explicitly skips ``t_*`` worktrees ("dispatcher-driven
 lifecycle"), and ``kanban gc`` only swept scratch. A completed or archived
 task's linked worktree is now removed when — and only when — it provably
-holds no work: clean working tree and every commit reachable from a
-remote-tracking ref. Any doubt preserves the worktree.
+holds no work: clean working tree and HEAD already in ``origin/main``
+(or ``origin/master``). Any doubt preserves the worktree.
 """
 
 from __future__ import annotations
@@ -173,6 +173,72 @@ def test_unpushed_commits_preserved(repo: Path) -> None:
     _git("-C", str(wt), "commit", "-m", "local work")
     kbw._cleanup_worktree_workspace("t_cccc3333", str(wt))
     assert wt.is_dir()
+
+
+def _commit_in(wt: Path, name: str) -> None:
+    (wt / name).write_text(name + "\n", encoding="utf-8")
+    _git("-C", str(wt), "add", name)
+    _git("-C", str(wt), "commit", "-m", name)
+
+
+def test_pushed_task_branch_not_in_main_preserved(repo: Path) -> None:
+    wt = _make_worktree(repo, "t_cccc4444")
+    _commit_in(wt, "work.txt")
+    _git("-C", str(wt), "push", "origin", "wt/t_cccc4444")
+    kbw._cleanup_worktree_workspace("t_cccc4444", str(wt))
+    assert wt.is_dir()  # pushed, but not yet in origin main
+
+
+def test_work_pushed_to_origin_main_removed(repo: Path) -> None:
+    trunk = _git("-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD").strip()
+    wt = _make_worktree(repo, "t_cccc5555")
+    _commit_in(wt, "work.txt")
+    _git("-C", str(wt), "push", "origin", f"HEAD:{trunk}")
+    kbw._cleanup_worktree_workspace("t_cccc5555", str(wt))
+    assert not wt.exists()
+    assert not _branch_exists(repo, "wt/t_cccc5555")
+
+
+def test_work_cherry_picked_onto_origin_main_removed(repo: Path, tmp_path: Path) -> None:
+    trunk = _git("-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD").strip()
+    wt = _make_worktree(repo, "t_cccc6666")
+    _commit_in(wt, "work.txt")
+    sha = _git("-C", str(wt), "rev-parse", "HEAD").strip()
+    other = tmp_path / "lander"
+    _git("clone", str(tmp_path / "origin.git"), str(other))
+    _git("-C", str(other), "config", "user.email", "l@example.com")
+    _git("-C", str(other), "config", "user.name", "l")
+    _commit_in(other, "other.txt")  # main moved on, so the landed sha differs
+    _git("-C", str(other), "fetch", str(repo), "wt/t_cccc6666")
+    _git("-C", str(other), "cherry-pick", sha)
+    _git("-C", str(other), "push", "origin", f"HEAD:{trunk}")
+    kbw._cleanup_worktree_workspace("t_cccc6666", str(wt))
+    assert not wt.exists()
+
+
+def test_new_worktree_starts_from_newer_origin_main(repo: Path, tmp_path: Path) -> None:
+    trunk = _git("-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD").strip()
+    other = tmp_path / "other"
+    _git("clone", str(tmp_path / "origin.git"), str(other))
+    _git("-C", str(other), "config", "user.email", "t@example.com")
+    _git("-C", str(other), "config", "user.name", "t")
+    (other / "new.txt").write_text("upstream\n", encoding="utf-8")
+    _git("-C", str(other), "add", "new.txt")
+    _git("-C", str(other), "commit", "-m", "upstream work")
+    _git("-C", str(other), "push", "origin", "HEAD")
+    if trunk not in ("main", "master"):
+        pytest.skip("default branch is neither main nor master")
+    wt = _make_worktree(repo, "t_abcd0001")
+    assert (wt / "new.txt").exists()  # base was origin's newer trunk, not the stale checkout
+    assert not (repo / "new.txt").exists()  # the main checkout is untouched
+
+
+def test_new_worktree_keeps_newer_local_main(repo: Path) -> None:
+    (repo / "local.txt").write_text("local only\n", encoding="utf-8")
+    _git("-C", str(repo), "add", "local.txt")
+    _git("-C", str(repo), "commit", "-m", "local-only work")
+    wt = _make_worktree(repo, "t_abcd0002")
+    assert (wt / "local.txt").exists()
 
 
 def test_custom_branch_survives_worktree_removal(repo: Path) -> None:
