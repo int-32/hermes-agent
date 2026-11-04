@@ -71,6 +71,32 @@ def worker_env(monkeypatch, tmp_path):
     return tid
 
 
+def test_show_gives_each_run_its_owner_session_beyond_event_window(worker_env):
+    """A long run's heartbeats push owner_admitted out of the 50-event window; the
+    run row still names its session and the profile whose store holds it."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    conn = kbc.connect()
+    try:
+        run_id = kb._current_run_id(conn, worker_env)
+        with kb.write_txn(conn):
+            kb._append_event(conn, worker_env, "owner_admitted",
+                             {"db": "/u/.hermes/profiles/aiyu-ops/state.db", "session_id": "local-abc"},
+                             run_id=run_id)
+            for _ in range(60):
+                kb._append_event(conn, worker_env, "heartbeat", {}, run_id=run_id)
+    finally:
+        conn.close()
+    d = json.loads(kt._handle_show({}))
+    assert all(e["kind"] != "owner_admitted" for e in d["events"])
+    run = next(r for r in d["runs"] if r["id"] == run_id)
+    assert run["session"] == {"session_id": "local-abc", "profile": "aiyu-ops"}
+    assert kt._run_sessions([kb.Event(1, worker_env, "owner_admitted",
+                                      {"db": "/u/.hermes/state.db", "session_id": "s"}, 0, 7)]) \
+        == {7: {"session_id": "s", "profile": "default"}}
+
+
 def test_show_defaults_to_env_task_id(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_show({})
