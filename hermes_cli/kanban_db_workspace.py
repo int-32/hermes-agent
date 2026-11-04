@@ -435,7 +435,7 @@ def _cleanup_worktree_workspace(
     it. The auto-generated ``wt/<task-id>`` branch is deleted with it; custom
     branches are kept. Best-effort."""
     try:
-        from hermes_cli.worktree_ops import _worktree_has_unpushed_commits, _worktree_is_dirty
+        from hermes_cli.worktree_ops import _worktree_is_dirty
     except Exception:
         return  # CLI safety predicates unavailable — preserve
     try:
@@ -448,9 +448,12 @@ def _cleanup_worktree_workspace(
         repo_root = common.parent
         if _path_key(wp.resolve(strict=False)) == _path_key(repo_root.resolve(strict=False)):
             return  # never remove the main checkout
-        if _worktree_is_dirty(str(wp), str(repo_root)) or _worktree_has_unpushed_commits(str(wp)):
+        if (
+            _worktree_is_dirty(str(wp), str(repo_root))
+            or not _in_remote_trunk(repo_root, wp)
+        ):
             _kb._log.info(
-                "Preserving worktree for task %s: dirty or unpushed work at %s",
+                "Preserving worktree for task %s: work not yet in origin main at %s",
                 task_id, wp,
             )
             return
@@ -688,6 +691,50 @@ def _repo_root_for_worktree_target(path: Path) -> Optional[Path]:
         current = current.parent
 
 
+def _in_remote_trunk(repo_root: Path, worktree: Path) -> bool:
+    """Whether every commit of the worktree's HEAD is already in ``origin/main``
+    (or ``origin/master``) after a best-effort fetch. Compared by patch
+    (``git cherry``), so work landed by cherry-pick or rebase counts; a patch
+    changed while landing does not. Any doubt -> False."""
+    try:
+        _git(repo_root, "fetch", "--quiet", "origin", timeout=60)
+        for name in ("main", "master"):
+            ref = f"refs/remotes/origin/{name}"
+            if _git(repo_root, "rev-parse", "--verify", "--quiet", ref, timeout=10).returncode == 0:
+                cherry = _git(worktree, "cherry", ref, "HEAD", timeout=30)
+                return cherry.returncode == 0 and not any(
+                    line.startswith("+") for line in cherry.stdout.splitlines()
+                )
+    except Exception:
+        pass
+    return False
+
+
+def _latest_trunk(repo_root: Path) -> str:
+    """Base for a new task branch: the newer of local ``main``/``master`` and its
+    ``origin/`` copy after a best-effort fetch, so a stale main checkout does not
+    start work on old code. Diverged -> the local branch; no trunk -> ``HEAD``."""
+    try:
+        return _newest_trunk_ref(repo_root)
+    except Exception:
+        return "HEAD"  # fetch/rev-parse trouble never blocks a worktree
+
+
+def _newest_trunk_ref(repo_root: Path) -> str:
+    _git(repo_root, "fetch", "--quiet", "origin", timeout=60)
+    for name in ("main", "master"):
+        local = f"refs/heads/{name}"
+        remote = f"refs/remotes/origin/{name}"
+        has_local = _git(repo_root, "rev-parse", "--verify", "--quiet", local, timeout=10).returncode == 0
+        has_remote = _git(repo_root, "rev-parse", "--verify", "--quiet", remote, timeout=10).returncode == 0
+        if has_local and has_remote:
+            ahead = _git(repo_root, "merge-base", "--is-ancestor", local, remote, timeout=10).returncode == 0
+            return remote if ahead else local
+        if has_local or has_remote:
+            return local if has_local else remote
+    return "HEAD"
+
+
 def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> None:
     """Materialize ``target`` as a linked git worktree under ``repo_root``."""
     target = target.expanduser()
@@ -698,7 +745,7 @@ def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> Non
     if _git_branch_exists(repo_root, branch_name):
         args = ["worktree", "add", str(target), branch_name]
     else:
-        args = ["worktree", "add", "-b", branch_name, str(target), "HEAD"]
+        args = ["worktree", "add", "-b", branch_name, str(target), _latest_trunk(repo_root)]
     result = _git(repo_root, *args, timeout=60)
     if result.returncode != 0:
         stderr = (result.stderr or result.stdout or "").strip()
