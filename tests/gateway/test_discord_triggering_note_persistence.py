@@ -10,7 +10,7 @@ import pytest
 from gateway.config import GatewayConfig, Platform
 from gateway.platforms.event import MessageEvent
 from gateway.run import GatewayRunner
-from gateway.run_inbound import discord_triggering_note
+from gateway.run_inbound import discord_triggering_note, slack_triggering_note, strip_discord_triggering_note
 from gateway.session import SessionSource
 
 
@@ -87,3 +87,19 @@ async def test_queued_followup_persists_authored_text():
     kwargs = runner._run_agent.await_args.kwargs
     assert kwargs["message"] == f"{note}\n\nthe follow-up"
     assert kwargs["persist_user_message"] == "the follow-up"
+
+
+def _slack_source() -> SessionSource:
+    return SessionSource(platform=Platform.SLACK, chat_id="D1", chat_type="dm", user_id="U1")
+
+
+def test_slack_turn_gets_triggering_note_and_it_is_stripped_before_persist() -> None:
+    event = MessageEvent(text="hello", message_id="1793785596.679829")
+    text = GatewayRunner._prepend_inbound_reply_context(event, _slack_source(), "hello")
+    assert text == f"{slack_triggering_note('1793785596.679829')}\n\nhello"
+    assert strip_discord_triggering_note(event, text) == "hello"
+
+
+def test_slack_turn_without_message_id_gets_no_note() -> None:
+    event = MessageEvent(text="hello")
+    assert GatewayRunner._prepend_inbound_reply_context(event, _slack_source(), "hello") == "hello"

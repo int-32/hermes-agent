@@ -55,6 +55,11 @@ def discord_triggering_note(message_id: Any) -> str:
     )
 
 
+def slack_triggering_note(message_id: Any) -> str:
+    """Model-facing routing note for a Slack turn; gives an agent a stable id for idempotency."""
+    return f"[Triggering message id: `{message_id}`]"
+
+
 def strip_discord_triggering_note(event: Any, message_text: Any) -> Any:
     """Authored text for the durable user row: peel off exactly the note
     ``_prepend_inbound_reply_context`` added for THIS event, if present. The note is a
@@ -64,8 +69,9 @@ def strip_discord_triggering_note(event: Any, message_text: Any) -> Any:
     message_id = getattr(event, "message_id", None)
     if not message_id or not isinstance(message_text, str):
         return message_text
-    prefix = f"{discord_triggering_note(message_id)}\n\n"
-    return message_text.removeprefix(prefix)
+    for note in (discord_triggering_note, slack_triggering_note):
+        message_text = message_text.removeprefix(f"{note(message_id)}\n\n")
+    return message_text
 
 
 class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionMixin, GatewayPluginInjectionMixin):
@@ -1575,6 +1581,12 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
             from gateway.session import _discord_tools_loaded as _disc_tools_loaded
             if _disc_tools_loaded():
                 message_text = f"{discord_triggering_note(event.message_id)}\n\n{message_text}"
+        elif (
+            source is not None
+            and getattr(source, "platform", None) == Platform.SLACK
+            and getattr(event, "message_id", None)
+        ):
+            message_text = f"{slack_triggering_note(event.message_id)}\n\n{message_text}"
         return message_text
 
     async def _inbound_model_context_length(self, source: SessionSource, session_key: str) -> int:
