@@ -429,11 +429,14 @@ def build_session_context_prompt(context: SessionContext, *, redact_pii: bool = 
             f"**Session type:** {session_label} — messages are prefixed with [sender name]. "
             "Multiple users may participate."
         )
-    elif src.user_name:
-        lines.append(f"**User:** {_format_untrusted_prompt_value(src.user_name)}")
-    elif src.user_id:
-        uid = _hash_sender_id(src.user_id) if redact_pii else src.user_id
-        lines.append(f"**User ID:** {_format_untrusted_prompt_value(uid)}")
+    else:
+        if src.user_name:
+            lines.append(f"**User:** {_format_untrusted_prompt_value(src.user_name)}")
+        # Always show the platform user id too: the display name is user-editable, so rules that must
+        # know WHO is speaking (e.g. "only this user can approve") need the id the platform verified.
+        if src.user_id:
+            uid = _hash_sender_id(src.user_id) if redact_pii else src.user_id
+            lines.append(f"**User ID:** {_format_untrusted_prompt_value(uid)}")
 
     lines.extend(_PLATFORM_NOTES.get(src.platform, lambda ctx: [])(context))
     platforms_list = ["local (files on this machine)"] + [
