@@ -105,6 +105,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 {"task_id": tid, "assignee": who, "current": current}
                 for (tid, who, current) in res.skipped_per_profile_capped
             ],
+            "skipped_executor_unavailable": res.skipped_executor_unavailable,
             "auto_assigned_default": res.auto_assigned_default,
             "respawn_guarded": [
                 {"task_id": tid, "reason": reason}
@@ -141,6 +142,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         print(f"Skipped (unassigned): {', '.join(res.skipped_unassigned)}")
     for tid, who, current in res.skipped_per_profile_capped:
         print(f"Deferred ({who} at per-profile cap, {current} running): {tid}")
+    if res.skipped_executor_unavailable:
+        print(f"Waiting (no executor machine free): {', '.join(res.skipped_executor_unavailable)}")
     if res.skipped_nonspawnable:
         print(
             f"Skipped (non-spawnable assignee — terminal lane, OK): "
@@ -321,6 +324,12 @@ def _cmd_gc(args: argparse.Namespace) -> int:
                 # Backstop for worktrees that escaped the completion/archive hook.
                 # Same safety predicate: only clean, fully-pushed worktrees go.
                 wt_path = row["workspace_path"]
+                if wt_path and wt_path.startswith("ssh://"):
+                    if kbw._defer_shared_worktree_cleanup(conn, row["id"], wt_path):
+                        continue
+                    if kbw._cleanup_remote_worktree(row["id"], wt_path, row["branch_name"]):
+                        removed_ws += 1
+                    continue
                 if wt_path and Path(wt_path).is_dir():
                     if kbw._defer_shared_worktree_cleanup(conn, row["id"], wt_path):
                         continue

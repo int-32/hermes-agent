@@ -28,6 +28,16 @@ _SSH_MULTIPLEX = os.name != "nt"
 # Module-level binding: tests patch ``ssh._load_hermes_env_vars`` to fake the .env file.
 _load_hermes_env_vars = load_hermes_env_vars
 
+# A Kanban worker's task identity, which its guidance refers to (``cd $HERMES_KANBAN_WORKSPACE``).
+# Not secret, and sshd drops SendEnv names it does not AcceptEnv, so these travel inline.
+_KANBAN_INLINE_ENV = ("HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKSPACE", "HERMES_KANBAN_BRANCH")
+
+
+def _prepend_kanban_env(cmd_string: str) -> str:
+    exports = [f"export {name}={shlex.quote(value)}" for name in _KANBAN_INLINE_ENV
+               if (value := os.environ.get(name))]
+    return "\n".join([*exports, cmd_string]) if exports else cmd_string
+
 
 def _ensure_ssh_available() -> None:
     """Fail fast with a clear error when the SSH client is unavailable."""
@@ -284,7 +294,8 @@ class SSHEnvironment(BaseEnvironment):
         remote sshd must ``AcceptEnv`` them (#14091). Profile-scoped names missing from the active
         scope are unset remotely so a shared host cannot serve another profile's value."""
         values, unset_names = resolve_passthrough_env(hermes_env_loader=_load_hermes_env_vars)
-        cmd = self._build_ssh_command(send_env=values) + bash_argv(shlex.quote(prepend_unset(cmd_string, unset_names)), login)
+        cmd = self._build_ssh_command(send_env=values) + bash_argv(
+            shlex.quote(prepend_unset(_prepend_kanban_env(cmd_string), unset_names)), login)
         client_env = client_env_with(values)
         return _popen_bash(cmd, stdin_data, env=client_env) if client_env is not None else _popen_bash(cmd, stdin_data)
 

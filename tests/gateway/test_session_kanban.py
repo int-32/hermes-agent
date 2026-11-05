@@ -146,3 +146,52 @@ def test_claim_reclaimed_before_admission_marker_is_refused(tmp_path, monkeypatc
     assert calls == []
     with closing(connect(board='owned')) as conn:
         assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='owner_admitted'", (task_id,)).fetchone()[0] == 0
+
+
+def test_remote_workspace_runs_terminal_on_its_executor(tmp_path, monkeypatch):
+    """An executor-pool task: the session works from a host scratch dir while its terminal (and
+    so the file tools) runs over SSH in the remote worktree."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_executors as kexec
+    from hermes_cli import kanban_db_workspace as kbw
+    from hermes_cli.kanban_db_connect import connect
+    from gateway.session_contract import Principal
+    from gateway.session_kanban import build_kanban_policy
+    from contextlib import closing
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    monkeypatch.delenv('HERMES_KANBAN_DB', raising=False)
+    monkeypatch.delenv('HERMES_KANBAN_WORKSPACES_ROOT', raising=False)
+    monkeypatch.setattr('hermes_cli.profiles.resolve_profile_env', lambda name: str(tmp_path))
+    (tmp_path / 'config.yaml').write_text(
+        'kanban:\n  executor_pool:\n    key: /keys/exec\n    profiles: [default]\n    boards: [owned]\n'
+        '    machines:\n      - {name: m1, host: 10.0.0.1, user: aiyu}\n')
+    kexec._pool_cache = (None, None)
+    uri = 'ssh://aiyu@10.0.0.1/Users/aiyu/workspace/aiyu/repo/.worktrees/'
+    kb.create_board('owned')
+    with closing(connect(board='owned')) as conn:
+        task_id = kb.create_task(conn, title='Remote', assignee='default', workspace_kind='worktree')
+        kb.recompute_ready(conn)
+        task = kb.claim_task(conn, task_id)
+        kbw.set_workspace_path(conn, task.id, uri + task.id)
+    actor = Principal('owner', str(tmp_path), frozenset({'session:create'}), 'transport')
+    connection = SimpleNamespace(authority=SimpleNamespace(profile_id=str(tmp_path)), actor=actor, native_owner=True)
+    params = dict(board='owned', task_id=task.id, run_id=task.current_run_id, claim_lock=task.claim_lock)
+    policy, _ = build_kanban_policy(connection, params, {'model': {'default': 'm', 'provider': 'custom'}})
+    terminal, context = json.loads(policy.terminal_json), json.loads(policy.kanban_json)
+    local = kb.workspaces_root(board='owned') / task.id
+    assert policy.cwd == str(local.resolve()) and local.is_dir()
+    assert context['workspace'] == '/Users/aiyu/workspace/aiyu/repo/.worktrees/' + task.id
+    assert context['local_cwd'] == policy.cwd
+    assert terminal['TERMINAL_ENV'] == 'ssh' and terminal['TERMINAL_SSH_HOST'] == '10.0.0.1'
+    assert terminal['TERMINAL_SSH_KEY'] == '/keys/exec' and terminal['TERMINAL_SSH_SYNC_FILES'] == 'false'
+    assert terminal['TERMINAL_CWD'] == context['workspace']
+    from gateway.session_policy import restore_policy
+    from dataclasses import asdict
+    assert json.loads(restore_policy(json.loads(json.dumps(asdict(policy)))).terminal_json)['TERMINAL_ENV'] == 'ssh'
+    # A URI the pool does not know never runs anywhere.
+    (tmp_path / 'config.yaml').write_text('kanban: {}\n')
+    from hermes_state_runtime import RuntimeStoreError
+    with pytest.raises(RuntimeStoreError, match='invalid_kanban_claim'):
+        build_kanban_policy(connection, params, {'model': {'default': 'm', 'provider': 'custom'}})

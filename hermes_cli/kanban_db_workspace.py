@@ -425,6 +425,19 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         pass  # best-effort — never block completion
 
 
+def _cleanup_remote_worktree(task_id: str, uri: str, branch_name: Optional[str] = None) -> bool:
+    """Executor-pool worktree: the same keep-unless-provably-merged predicate, evaluated on its
+    machine. The worker's local cwd (an empty scratch dir) goes once the remote checkout is gone.
+    True when the checkout was removed by this call."""
+    from hermes_cli import kanban_executors as _kexec
+    verdict = _kexec.cleanup_worktree(task_id, uri, branch_name)
+    if verdict in ("removed", "gone"):
+        local = _kb.workspaces_root() / task_id
+        if local.is_dir() and not local.is_symlink() and _is_managed_scratch_path(local):
+            shutil.rmtree(local, ignore_errors=True)
+    return verdict == "removed"
+
+
 def _cleanup_worktree_workspace(
     task_id: str, path: str, branch_name: Optional[str] = None
 ) -> None:
@@ -434,6 +447,9 @@ def _cleanup_worktree_workspace(
     ref; any doubt (dirty, unpushed, unresolvable repo, failing git) preserves
     it. The auto-generated ``wt/<task-id>`` branch is deleted with it; custom
     branches are kept. Best-effort."""
+    if path.startswith("ssh://"):
+        _cleanup_remote_worktree(task_id, path, branch_name)
+        return
     try:
         from hermes_cli.worktree_ops import _worktree_is_dirty
     except Exception:
@@ -768,7 +784,9 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
     instead of the dispatcher's incidental CWD (whatever dir the gateway was
     launched from); with no anchor configured we fail loudly rather than guess."""
     branch_name = (task.branch_name or "").strip() or f"wt/{task.id}"
-    if not task.workspace_path:
+    # A remote (executor-pool) path from an earlier attempt is no local anchor: this attempt runs
+    # here, so it anchors on the board repo like a task that never had a workspace.
+    if not task.workspace_path or task.workspace_path.startswith("ssh://"):
         board_slug = board if board else _kb.get_current_board()
         board_default = (_kb.read_board_metadata(board_slug).get("default_workdir") or "").strip()
         if not board_default:

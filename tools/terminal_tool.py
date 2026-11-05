@@ -818,6 +818,9 @@ def _get_env_config() -> dict[str, Any]:
         "ssh_persistent": _tenv_bool(
             "TERMINAL_SSH_PERSISTENT", _tenv("TERMINAL_PERSISTENT_SHELL", "true"),
         ),
+        # Copy this host's ~/.hermes skills/credential files to the SSH host. Off for kanban
+        # executors, which use their own logins and must not receive the dispatcher's secrets.
+        "ssh_sync_files": _tenv_bool("TERMINAL_SSH_SYNC_FILES", "true"),
         "local_persistent": _tenv_bool("TERMINAL_LOCAL_PERSISTENT", "true"),
         # Container resources (MB); ignored for local/ssh.
         "container_cpu": container_cpu,
