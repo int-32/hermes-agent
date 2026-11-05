@@ -928,3 +928,33 @@ def test_synthesized_run_for_unassigned_card_keeps_null_profile(kanban_home: Pat
             "SELECT profile, outcome FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (tid,),
         ).fetchone()
         assert (run["outcome"], run["profile"]) == ("blocked", None)
+
+
+def test_active_pr_guard_lifts_after_unblock_and_guard_event_is_deduped(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The implementer posts its PR then blocks for input; the operator's unblock
+    is the instruction to continue on THAT PR, so it lifts ``active_pr`` instead
+    of parking the card in ready for the whole PR window. While a card is guarded,
+    each tick must not append another identical ``respawn_guarded`` event."""
+    import hermes_cli.config as cfgmod
+    import hermes_cli.profiles as profmod
+
+    monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+    monkeypatch.setattr(cfgmod, "load_config", lambda *a, **k: {})
+    pr_comment = "Opened https://github.com/example/repo/pull/8 for review."
+    with kbc.connect() as conn:
+        guarded = kb.create_task(conn, title="still guarded", assignee="dev")
+        kb.add_comment(conn, guarded, author="dev", body=pr_comment)
+        for _ in range(3):
+            kbd.dispatch_once(conn, dry_run=False, spawn_fn=lambda _t, _w: 4242)
+        kinds = [e.kind for e in kb.list_events(conn, guarded)]
+        assert kinds.count("respawn_guarded") == 1
+
+        tid = kb.create_task(conn, title="blocked after pr", assignee="dev")
+        kb.add_comment(conn, tid, author="dev", body=pr_comment)
+        assert kb.block_task(conn, tid, reason="need permissions")
+        _backdate_comments(conn, tid)
+        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
+        assert kb.unblock_task(conn, tid) is True
+        assert kbd.check_respawn_guard(conn, tid) is None

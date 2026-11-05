@@ -1636,10 +1636,12 @@ def check_respawn_guard(
 
     # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
     #    Exception: a handoff AFTER the newest PR comment (operator reassign,
-    #    reviewer changes_requested, review reopen) names the profile that must
-    #    now work on THAT PR — a closer or the implementer finishing it, not a
-    #    duplicate implementation (#111910). A crash/reclaim is not a handoff,
-    #    so the worker that opened the PR is still not re-spawned against it.
+    #    reviewer changes_requested, review reopen, an explicit unblock) names the
+    #    profile that must now work on THAT PR — a closer or the implementer
+    #    finishing it, not a duplicate implementation (#111910). An unblock is the
+    #    answer to the implementer's own "blocked after opening the PR"; without it
+    #    the card sits in ready for the whole PR window. A crash/reclaim is not a
+    #    handoff, so the worker that opened the PR is still not re-spawned against it.
     pr_times = [t for t, c in _rows_since(conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
                                           cols=", body", unreadable=now)  # duplicate-PR risk: fail closed
                 if _RESPAWN_GUARD_PR_URL_RE.search(_kb._lossy_text(c["body"]) or "")]
@@ -1647,7 +1649,8 @@ def check_respawn_guard(
         # Strictly after: a same-second tie stays guarded (fail closed).
         if any(_is_handoff_event(e["kind"], e["payload"]) for _, e in _rows_since(
                 conn, "task_events", task_id, max(pr_times),
-                "AND kind IN ('assigned', 'changes_requested', 'review_reopened')", cols=", kind, payload", strict=True)):
+                "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked')",
+                cols=", kind, payload", strict=True)):
             return None
         return "active_pr"
 
@@ -1786,6 +1789,11 @@ def dispatch_profile_allowlist_summary() -> str:
 
 
 def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
+    # A tracking-only board never dispatches, so its ready cards are not "work
+    # waiting for a worker" — counting them made health telemetry report the
+    # dispatcher as stuck on every tick.
+    if _kb.board_tracking_only(conn):
+        return False
     rows = conn.execute(
         "SELECT DISTINCT assignee FROM tasks "
         "WHERE status = ? AND assignee IS NOT NULL AND claim_lock IS NULL",
@@ -2105,9 +2113,16 @@ def _dispatch_lane_task(
         # the operator's intent ("default") was perfectly clear (#27145). Mutating the row (not just the
         # in-memory view) keeps diagnostics and the board state consistent: the task is now legitimately
         # owned by ``kanban.default_assignee``, not "unassigned but secretly routed".
+        # Deduped like ``skipped_nonspawnable``: one row per reason change, not one per tick.
         if not dry_run:
             with _kb.write_txn(conn):
-                _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
+                last = conn.execute(
+                    "SELECT kind, payload FROM task_events WHERE task_id = ? "
+                    "ORDER BY created_at DESC, id DESC LIMIT 1", (task_id,)).fetchone()
+                payload = {"reason": guard_reason}
+                if (last is None or last["kind"] != "respawn_guarded"
+                        or last["payload"] != _kb._json_or_null(payload)):
+                    _kb._append_event(conn, task_id, "respawn_guarded", payload)
         return False
 
     # Executor pool: pick the machine BEFORE claiming, so "every machine busy" leaves the task

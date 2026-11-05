@@ -1009,6 +1009,17 @@ def _extra_or_env_channel_set_getter(
     return getter
 
 
+_CODE_CHANNEL_ORIGIN_CONTEXT_BLOCK_ID = "agent_channel_origin_context"
+
+
+def _is_code_channel_origin_context(event: dict) -> bool:
+    """True for the context post Slack writes into a freshly created Code Channel."""
+    blocks = event.get("blocks")
+    return isinstance(blocks, list) and any(
+        isinstance(b, dict) and b.get("block_id") == _CODE_CHANNEL_ORIGIN_CONTEXT_BLOCK_ID
+        for b in blocks)
+
+
 class SlackAdapter(BasePlatformAdapter):
     """Slack bot adapter (Socket Mode).
     Needs SLACK_BOT_TOKEN (xoxb-, API calls) and SLACK_APP_TOKEN (xapp-, Socket Mode). DMs +
@@ -4259,7 +4270,13 @@ class SlackAdapter(BasePlatformAdapter):
         if original_message_ts and original_message_ts in self._processed_message_ts:
             return None
         edited = updated_message.get("edited")
-        edited_ts = str(edited.get("ts") or "") if isinstance(edited, dict) else ""
+        if not isinstance(edited, dict):
+            # No ``edited`` stamp: Slack itself rewrote the message (link unfurl, a Code Channel
+            # origin-status block), not the person. ``_processed_message_ts`` is in-memory, so after
+            # a restart such a rewrite of an already-answered message would otherwise re-enter
+            # admission with a changed payload and surface ``admission_conflict`` in the thread.
+            return None
+        edited_ts = str(edited.get("ts") or "")
         outer_event_ts = str(event.get("ts") or "")
         changed_event_ts = (
             str(event.get("event_ts") or edited_ts or "")
@@ -4531,6 +4548,11 @@ class SlackAdapter(BasePlatformAdapter):
             logger.info("[Slack] Ignoring message in configured ignored channel %s", channel_id)
             return None
         if await self._drop_bot_sender(event):
+            return None
+        if _is_code_channel_origin_context(event):
+            # Slack posts the origin message into a new Code Channel under the origin AUTHOR's
+            # name (no bot_id/subtype); its quoted @mention would otherwise start a turn there.
+            logger.info("[Slack] Ignoring Code Channel origin-context post in %s", channel_id)
             return None
         # Edits were normalized above so an @mention added by edit can wake the bot once;
         # the normalized event retains the edited message's own subtype.
