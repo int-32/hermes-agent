@@ -1094,7 +1094,7 @@ def _prepare_runtime_status_update(
     parked_profiles: Any = _UNSET, multiplex_standalone_reason: Any = _UNSET,
     platform_metrics: Any = _UNSET,
     ingress_url: Any = _UNSET, listener_base: Any = _UNSET, clear_profile_platforms: bool = False,
-    drop_profile_platforms: Optional[str] = None,
+    drop_profile_platforms: Optional[str] = None, keep_primary_platforms: Any = None,
     load_existing: bool = True, reload_existing: bool = False,
 ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     """Merge one update into the process-wide canonical status snapshot."""
@@ -1119,6 +1119,14 @@ def _prepare_runtime_status_update(
                 k: v for k, v in payload["platforms"].items()
                 if not isinstance(k, str) or ":" not in k
                 or (drop_prefix is not None and not k.startswith(drop_prefix))
+            }
+        if clear_profile_platforms and keep_primary_platforms is not None:
+            # A primary entry for a platform the primary no longer runs (moved to a secondary profile,
+            # disabled) would otherwise stay "connected" forever: nothing rewrites or removes it.
+            keep = {str(name) for name in keep_primary_platforms}
+            payload["platforms"] = {
+                k: v for k, v in payload["platforms"].items()
+                if not isinstance(k, str) or ":" in k or k in keep
             }
         payload.update({key: current_record[key] for key in ("kind", "pid", "argv", "start_time")})
         payload["updated_at"] = _utc_now_iso()

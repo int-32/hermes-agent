@@ -1102,8 +1102,11 @@ class TestSecondaryProfileConfigHandling:
         assert connected == (2 if paired else 1)
         assert factory_calls == ([Platform.WHATSAPP, Platform.DISCORD] if paired else [Platform.DISCORD])
         if not paired:
-            assert statuses[-1][1]["error_code"] == "whatsapp_unpaired"
-            assert "hermes -p clientbot whatsapp" in statuses[-1][1]["error_message"]
+            whatsapp = [kw for args, kw in statuses if args[0] == "clientbot:whatsapp"][-1]
+            assert whatsapp["error_code"] == "whatsapp_unpaired"
+            assert "hermes -p clientbot whatsapp" in whatsapp["error_message"]
+            # The connected secondary is recorded under its profile key too.
+            assert ("clientbot:discord", "connected") in [(args[0], kw.get("platform_state")) for args, kw in statuses]
 
 
 class TestSecondaryProfileHookRegistration:

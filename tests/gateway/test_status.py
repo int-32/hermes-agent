@@ -1811,3 +1811,28 @@ def test_retained_gateway_state_keeps_watchdog_degraded_like_startup_failed():
     assert status.retained_gateway_state({**watchdog, "desired_state": "stopped"}) == "stopped"
     assert status.retained_gateway_state({"gateway_state": "degraded", "exit_reason": None}) == "stopped"
     assert status.retained_gateway_state({"gateway_state": "startup_failed", "exit_reason": "x"}) == "startup_failed"
+
+
+class TestPrimaryPlatformPruning:
+    def test_startup_clear_drops_primary_entry_for_platform_no_longer_run(self, tmp_path, monkeypatch):
+        # Slack moved from the primary to a secondary profile: the old unkeyed "slack" entry
+        # kept saying "connected" forever because nothing rewrote or removed it.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "gateway_state.json").write_text(json.dumps({"platforms": {
+            "discord": {"state": "connected"},
+            "slack": {"state": "connected"},
+            "router:discord": {"state": "connected"},
+        }}), encoding="utf-8")
+
+        status.write_runtime_status(clear_profile_platforms=True, keep_primary_platforms={"discord"})
+
+        assert status.read_runtime_status()["platforms"] == {"discord": {"state": "connected"}}
+
+    def test_keep_primary_platforms_is_ignored_without_clear(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "gateway_state.json").write_text(
+            json.dumps({"platforms": {"slack": {"state": "connected"}}}), encoding="utf-8")
+
+        status.write_runtime_status(keep_primary_platforms=set())
+
+        assert set(status.read_runtime_status()["platforms"]) == {"slack"}

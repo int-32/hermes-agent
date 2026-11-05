@@ -172,6 +172,21 @@ class TestBuildSessionContextPrompt:
         assert "~/.hermes/profiles/coder/cron/output/" in prompt
 
 
+    def test_dm_prompt_shows_verified_user_id_next_to_display_name(self):
+        """A display name is user-editable; the platform user id must be visible so rules like
+        "only this user may approve" can tell the real user from a renamed colleague."""
+        config = GatewayConfig(
+            platforms={Platform.SLACK: PlatformConfig(enabled=True, token="xoxb-fake")},
+        )
+        source = SessionSource(
+            platform=Platform.SLACK, chat_id="D123", chat_type="dm",
+            user_name="Owner Name", user_id="U0OWNER",
+        )
+        prompt = build_session_context_prompt(build_session_context(source, config))
+
+        assert "**User:** Owner Name" in prompt or '**User:** "Owner Name"' in prompt
+        assert "U0OWNER" in prompt.split("**User ID:**", 1)[1].splitlines()[0]
+
     def test_prompt_quotes_untrusted_metadata_labels(self):
         """User-controlled gateway metadata must stay inert inside the prompt."""
         config = GatewayConfig(
