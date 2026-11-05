@@ -303,3 +303,33 @@ class TestClaimReleasedOnFailure:
 
         asyncio.run(scenario())
         assert len(delivered) == 1
+
+
+class TestSlackSystemRewrites:
+    """Slack-initiated rewrites and Code Channel context posts are not a person speaking."""
+
+    def test_system_rewrite_after_restart_does_not_redrive(self):
+        """No ``edited`` stamp = Slack rewrote the message (unfurl, Code Channel status block).
+        After a restart the in-memory claim map is empty, so this must not re-enter admission."""
+        delivered = []
+        adapter = _make_adapter(delivered)
+        adapter._resolve_user_name = AsyncMock(return_value="richard")
+        asyncio.run(adapter._handle_slack_message(_unfurl_event(), _body()))
+        assert delivered == []
+
+    def test_code_channel_origin_context_post_is_ignored(self):
+        delivered = []
+        adapter = _make_adapter(delivered)
+        adapter._resolve_user_name = AsyncMock(return_value="richard")
+        event = _original_event()
+        event.pop("client_msg_id")
+        event["blocks"] = [
+            {"type": "context", "block_id": "agent_channel_origin_context",
+             "elements": [{"type": "mrkdwn", "text": "Context from <#C0CEPRJ3ZQE>"}]},
+            {"type": "rich_text", "block_id": "/epgV", "elements": [{
+                "type": "rich_text_section",
+                "elements": [{"type": "user", "user_id": "U0BCLP7DB7B"}, {"type": "text", "text": " hi"}]}]},
+        ]
+        adapter._resolve_user_is_bot = AsyncMock(return_value=False)
+        asyncio.run(adapter._handle_slack_message(event, _body()))
+        assert delivered == []
