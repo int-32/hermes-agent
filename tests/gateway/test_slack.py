@@ -25,6 +25,7 @@ from agent import secret_scope
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.run import GatewayRunner
 from gateway.platforms.event import MessageEvent, MessageType
+from gateway.platforms.base import SendResult
 
 
 # ---------------------------------------------------------------------------
@@ -1263,6 +1264,32 @@ class TestSendDocument:
         assert call_kwargs["file"] == str(test_file)
         assert call_kwargs["filename"] == "report.pdf"
         assert call_kwargs["initial_comment"] == "Here's the report"
+
+    @pytest.mark.asyncio
+    async def test_short_markdown_document_posts_inline(self, adapter, tmp_path):
+        """Slack shows an uploaded .md only as a file card; a short one is posted as text."""
+        test_file = tmp_path / "report.md"
+        test_file.write_text("# Result\n\n- all good\n", encoding="utf-8")
+        adapter._app.client.files_upload_v2 = AsyncMock(return_value={"ok": True})
+        adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="1.2"))
+
+        result = await adapter.send_document(chat_id="C123", file_path=str(test_file), caption="Done")
+
+        assert result.success
+        adapter._app.client.files_upload_v2.assert_not_called()
+        text = adapter.send.await_args.args[1]
+        assert text.startswith("Done\n\n📄 *report.md*\n\n# Result")
+
+    @pytest.mark.asyncio
+    async def test_long_markdown_document_still_uploads(self, adapter, tmp_path):
+        test_file = tmp_path / "big.md"
+        test_file.write_text("x" * (adapter.INLINE_MARKDOWN_MAX_CHARS + 1), encoding="utf-8")
+        adapter._app.client.files_upload_v2 = AsyncMock(return_value={"ok": True})
+
+        result = await adapter.send_document(chat_id="C123", file_path=str(test_file))
+
+        assert result.success
+        adapter._app.client.files_upload_v2.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_send_document_uses_metadata_workspace_client(self, adapter, tmp_path):
