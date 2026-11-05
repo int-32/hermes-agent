@@ -136,3 +136,13 @@ def test_diagnostics_reports_resolved_allowlist(kanban_home, capsys, config, exp
     payload = json.loads(capsys.readouterr().out)
     assert payload == [{"task_id": None, "dispatch_profiles": payload[-1]["dispatch_profiles"], "diagnostics": []}]
     assert payload[-1]["dispatch_profiles"].startswith(expected)
+
+
+def test_tracking_only_board_has_no_spawnable_work(kanban_home, all_assignees_spawnable):
+    """A tracking-only board never dispatches, so its ready cards must not make
+    health telemetry report the dispatcher as stuck."""
+    with kbc.connect() as conn:
+        kb.set_board_tracking_only(conn, True)
+        kb.create_task(conn, title="tracked card", assignee="default")
+        assert conn.execute("SELECT status FROM tasks").fetchone()[0] == "ready"
+        assert kbd.has_spawnable_ready(conn) is False
