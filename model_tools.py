@@ -304,6 +304,11 @@ def _apply_toolset_selection(tools: set, names: list[str], quiet_mode: bool, *, 
         elif name in _LEGACY_TOOLSET_MAP:
             label = f"{verb} legacy toolset"
             resolved = _LEGACY_TOOLSET_MAP[name]
+        elif disable and registry.get_toolset_for_tool(name):
+            # A single tool name in agent.disabled_toolsets strips just that tool, so a profile can drop
+            # e.g. skill_manage while keeping skill_view/skills_list from the same toolset.
+            label = "Disabled tool"
+            resolved = [name]
         else:
             if not quiet_mode:
                 print(f"⚠️  Unknown toolset: {name}")
