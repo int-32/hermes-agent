@@ -91,7 +91,13 @@ def _ctx_header(lines: list[str], task: Task) -> None:
     lines.append(f"Status:   {task.status}")
     if task.tenant:
         lines.append(f"Tenant:   {task.tenant}")
-    lines.append(f"Workspace: {task.workspace_kind} @ {task.workspace_path or '(unresolved)'}")
+    workspace = task.workspace_path or "(unresolved)"
+    if workspace.startswith("ssh://"):
+        from urllib.parse import urlsplit
+        where = urlsplit(workspace)
+        workspace = (f"{where.path} on executor machine {where.username}@{where.hostname} "
+                     "(your terminal and file tools already run there)")
+    lines.append(f"Workspace: {task.workspace_kind} @ {workspace}")
     if task.max_runtime_seconds is not None:
         terminal_timeout = _kb._worker_terminal_timeout_env(
             task.max_runtime_seconds, os.environ.get("TERMINAL_TIMEOUT"),
@@ -136,6 +142,11 @@ def _ctx_prior_attempts(lines: list[str], conn: sqlite3.Connection, task_id: str
         return
     first_shown_idx = len(all_prior) - len(shown) + 1
     lines.append("## Prior attempts on this task")
+    lines.append(
+        "This is a retry. Before redoing anything, check what earlier attempts left: the workspace "
+        "contents, git log/status and the branch (local and pushed), and any PR or comments already "
+        "posted. Never repeat an external action (push, PR, comment, message, deploy) that already happened."
+    )
     if omitted_note:
         lines.append(omitted_note)
     for offset, run in enumerate(shown):

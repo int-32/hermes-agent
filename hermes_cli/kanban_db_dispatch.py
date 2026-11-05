@@ -117,6 +117,9 @@ class DispatchResult:
     """``(task_id, assignee, current_running_count)`` deferred because the
     assignee is at ``kanban.max_in_progress_per_profile``. Picked up on a later
     tick; separate bucket so dashboards show "profile busy" vs "stuck"."""
+    skipped_executor_unavailable: list[str] = field(default_factory=list)
+    """Task ids routed to ``kanban.executor_pool`` that wait because every executor machine is
+    full or unreachable (or the one holding a retry's worktree is busy). Not a failure."""
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
     auto_blocked: list[str] = field(default_factory=list)
@@ -2057,6 +2060,7 @@ def _dispatch_lane_task(
     spawn_fn,
     per_profile_cap: Optional[int],
     per_profile_running: dict[str, int],
+    executor_pool=None,
 ) -> bool:
     """Guard, claim, resolve the workspace and spawn one ready/review row.
     Returns True when a spawn slot was consumed (real or ``dry_run``); every
@@ -2106,6 +2110,21 @@ def _dispatch_lane_task(
                 _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
         return False
 
+    # Executor pool: pick the machine BEFORE claiming, so "every machine busy" leaves the task
+    # in ready without touching its run history or retry budget.
+    remote = None
+    if executor_pool is not None and executor_pool.serves(board, assignee):
+        task = _kb.get_task(conn, task_id)
+        repo_root = _kexec.local_repo_for(task, board) if task is not None else None
+        if repo_root is not None:
+            remote = _kexec.choose_machine(
+                executor_pool, conn, board, prefer=_kexec.prior_machine(executor_pool, task))
+            if remote is None:
+                result.skipped_executor_unavailable.append(task_id)
+                return False
+            if remote[0].local:
+                remote = None  # this host's own slot: the ordinary local worktree below
+
     def _count_spawn(name: str) -> None:
         # Later rows in this tick respect the per-profile cap; subsequent
         # ticks re-query from the DB.
@@ -2122,14 +2141,25 @@ def _dispatch_lane_task(
         return False
     try:
         resolved_branch_name = None
-        if claimed.workspace_kind == "worktree":
+        if remote is not None:
+            machine, home = remote
+            resolved_branch_name = (claimed.branch_name or "").strip() or f"wt/{claimed.id}"
+            workspace = _kexec.prepare_worktree(
+                executor_pool, machine, home, repo_root, claimed.id, resolved_branch_name)
+        elif claimed.workspace_kind == "worktree":
             workspace, resolved_branch_name = _kbw._resolve_worktree_workspace(claimed, board=board)
         else:
             workspace = _kbw.resolve_workspace(claimed, board=board)
     except Exception as exc:
+        # A dropped SSH connection says nothing about the task: no retry budget is spent, and the
+        # machine is skipped until its probe expires.
+        infrastructure = isinstance(exc, _kexec.ExecutorUnreachable)
+        if infrastructure:
+            _kexec.mark_unreachable(remote[0])
         if _record_task_failure(
             conn, claimed.id, f"workspace: {exc}",
             outcome="spawn_failed", failure_limit=failure_limit, release_claim=True, end_run=True,
+            infrastructure=infrastructure,
         ):
             result.auto_blocked.append(claimed.id)
         return False
@@ -2417,6 +2447,7 @@ def _dispatch_once_locked(
         dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
         failure_limit=failure_limit, spawn_fn=spawn_fn,
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
+        executor_pool=_kexec.load_pool(),
     )
     default_assignee = _resolve_default_assignee(default_assignee)
     spawned = 0
@@ -2961,3 +2992,4 @@ def run_daemon(
 from hermes_cli import kanban_db as _kb
 from hermes_cli import kanban_db_connect as _kbc
 from hermes_cli import kanban_db_workspace as _kbw
+from hermes_cli import kanban_executors as _kexec

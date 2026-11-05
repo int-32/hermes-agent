@@ -48,17 +48,33 @@ def build_kanban_policy(connection, params, config):
                 skills = list(dict.fromkeys([*skills, 'sdlc-review']))
     except (ValueError, OSError, sqlite3.Error) as exc:
         raise RuntimeStoreError('invalid_kanban_claim') from exc
-    cwd = task.workspace_path
-    params_policy = {'source': 'cli', 'cwd': cwd}
+    cwd = local_cwd = task.workspace_path
+    remote_terminal = None
+    from hermes_cli import kanban_executors as kexec
+    if kexec.is_remote(cwd):
+        # The worktree lives on an executor machine: the terminal and file tools run there over
+        # SSH, in that worktree. The session itself needs a host directory, so it gets the
+        # task's scratch dir (removed with the remote checkout).
+        pool = kexec.load_pool()
+        if pool is None or pool.machine_for(cwd) is None:
+            raise RuntimeStoreError('invalid_kanban_claim')
+        remote_terminal = kexec.terminal_overrides(pool, cwd)
+        cwd = kexec.remote_path(cwd)
+        local_cwd = kb.workspaces_root(board=board) / task.id
+        local_cwd.mkdir(parents=True, exist_ok=True)
+        local_cwd = str(local_cwd.resolve())
+    params_policy = {'source': 'cli', 'cwd': local_cwd}
     for name, value in (('model', task.model_override), ('provider', task.provider_override), ('reasoning', task.reasoning_effort)):
         if value:
             params_policy[name] = value
     private = {}
     policy = build_policy(params_policy, config, private_secrets=private)
+    if remote_terminal is not None:
+        policy = replace(policy, terminal_json=json.dumps({**json.loads(policy.terminal_json), **remote_terminal}))
     if policy.model is None:
         from gateway.run import _resolve_gateway_model
         policy = replace(policy, model=_resolve_gateway_model(policy.config()))
-    context = dict(params, workspace=cwd, branch=task.branch_name, tenant=task.tenant,
+    context = dict(params, workspace=cwd, local_cwd=local_cwd, branch=task.branch_name, tenant=task.tenant,
         profile=task.assignee, workspaces_root=str(kb.workspaces_root(board=board).resolve()),
         skills=skills, goal_mode=task.goal_mode, goal_max_turns=task.goal_max_turns,
         goal_text='\n\n'.join(p for p in (task.title, task.body) if p), context=context,
@@ -199,7 +215,9 @@ def bind_worker_context(frame):
         env['HERMES_KANBAN_CLAIM_TTL_SECONDS'] = str(max(1, expires - int(claimed[1])))
     _watch_submitter(Path(context['db']), context['run_id'])
     os.environ.update(env)
-    os.chdir(context['workspace'])
+    # A remote workspace (executor pool) is a path on another machine; this process works from
+    # its host-side directory. Contexts saved before the key existed are always local.
+    os.chdir(context.get('local_cwd') or context['workspace'])
 
 
 _TURNS_DONE = threading.Event()
