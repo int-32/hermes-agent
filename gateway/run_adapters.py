@@ -1344,8 +1344,20 @@ class GatewayAdapterLifecycleMixin:
                 if claim is not None:
                     claimed[claim] = profile_name
             connected += 1
+            self._mark_secondary_adapter_connected(profile_name, platform, adapter)
             logger.info("✓ %s connected (profile: %s)", platform.value, profile_name)
         return connected
+
+    def _mark_secondary_adapter_connected(self, profile_name, platform, adapter) -> None:
+        """Record a secondary adapter's connect under ``<profile>:<platform>``, as the primary path does.
+        Not every adapter stamps its own status (Slack, email, signal, sms never call ``_mark_connected``),
+        so without this the runtime status never showed those secondaries as connected. A degraded
+        (unconfirmed receive path) connect is recorded as retrying, not connected."""
+        degraded = getattr(adapter, "send_path_degraded", False)
+        self._update_platform_runtime_status(
+            f"{profile_name}:{platform.value}", platform_state="retrying" if degraded else "connected",
+            error_code=None, error_message=adapter.DEGRADED_STATUS_MESSAGE if degraded else None,
+        )
 
     def _wire_adapter_handlers(
         self, adapter: BasePlatformAdapter, *, message_handler=None, fatal_error_handler=None,
@@ -1486,6 +1498,7 @@ class GatewayAdapterLifecycleMixin:
                             profile_map[platform] = adapter
                             hand_over_held_inbound(predecessor, adapter)
                             self._sync_voice_mode_state_to_adapter(adapter)
+                            self._mark_secondary_adapter_connected(profile_name, platform, adapter)
                             logger.info("✓ %s reconnected (profile: %s)", platform.value, profile_name)
                             await self._redeliver_failed_obligations_for_platform(
                                 platform, profile=profile_name
