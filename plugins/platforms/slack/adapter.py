@@ -4194,6 +4194,31 @@ class SlackAdapter(BasePlatformAdapter):
                 "[Slack] Early reject of unauthorized user %s in channel %s", user_id, channel_id)
         return decision is False
 
+    def _should_pass_unauthorized_dm_for_reply(self) -> bool:
+        """True when an unauthorized 1:1 DM must still reach the gateway so the runner can answer it
+        per ``unauthorized_dm_behavior`` — a pairing code or a one-time decline; ``ignore`` stays
+        silent. Mirrors the Telegram adapter: without this the early reject drops the DM and the
+        configured decline message is never delivered."""
+        extra = getattr(getattr(self, "config", None), "extra", None) or {}
+        behavior = str(extra.get("unauthorized_dm_behavior", "")).strip().lower()
+        if behavior:
+            return behavior in ("pair", "decline")
+        # Bound-handler ``__self__`` is None under multiplex; then the platform block above is the
+        # only local source. An unresolvable behavior stays silent (fail-safe: no outbound reply).
+        runner = (
+            getattr(getattr(self, "_message_handler", None), "__self__", None)
+            or getattr(self, "gateway_runner", None)
+        )
+        behavior_fn = getattr(runner, "_get_unauthorized_dm_behavior", None)
+        if callable(behavior_fn):
+            try:
+                return behavior_fn(Platform.SLACK) != "ignore"
+            except Exception:
+                logger.debug(
+                    "[Slack] Failed to resolve unauthorized DM behavior; treating it as ignore",
+                    exc_info=True)
+        return False
+
     async def _channel_gate_allows(
         self, *, channel_id: str, routing_text: str, bot_uid: str, is_mentioned: bool,
         is_thread_reply: bool, event_thread_ts, user_id: str, team_id: str, is_dm: bool,
@@ -4647,7 +4672,11 @@ class SlackAdapter(BasePlatformAdapter):
         # Reject unauthorized users before the expensive lookups/downloads;
         # the runner's own auth check only runs after MessageEvent is built.
         thread_ts = self._session_thread_ts(event, ts, is_dm, assistant_meta)
-        if self._early_reject_unauthorized(user_id, channel_id, is_dm, thread_id=thread_ts):
+        # An unauthorized 1:1 DM still goes through when its behavior wants a reply (pair/decline);
+        # the runner answers it and never starts an agent turn.
+        if self._early_reject_unauthorized(user_id, channel_id, is_dm, thread_id=thread_ts) and not (
+            is_one_to_one_dm and self._should_pass_unauthorized_dm_for_reply()
+        ):
             return
         bot_uid = self._team_bot_user_ids.get(team_id, self._bot_user_id)
         # Mentions may live only in Block Kit blocks.
