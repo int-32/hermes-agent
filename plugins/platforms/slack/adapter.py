@@ -3545,36 +3545,12 @@ class SlackAdapter(BasePlatformAdapter):
         file_name: Optional[str] = None, reply_to: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None) -> SendResult:
         """Send a document/file attachment to Slack.
-        Only ``display_name`` (never the host-local path) goes in the failure notice.
-        A short Markdown file is posted as a formatted message instead: Slack shows an uploaded
-        ``.md`` only as a file card the reader has to open."""
+        Only ``display_name`` (never the host-local path) goes in the failure notice."""
         display_name = file_name or os.path.basename(file_path)
-        inline = self._inline_markdown_text(file_path, display_name, caption)
-        if inline is not None:
-            return await self.send(chat_id, inline, reply_to=reply_to, metadata=metadata)
         return await self._send_local_file(
             chat_id, file_path, caption, reply_to, metadata, "document", display_name,
             f"File not found: {file_path}", t("platform.shared.media.file_failed", name=display_name),
         )
-
-    INLINE_MARKDOWN_MAX_CHARS = 12000  # larger files stay uploads, not a wall of messages
-
-    @classmethod
-    def _inline_markdown_text(
-        cls, file_path: str, display_name: str, caption: Optional[str]) -> Optional[str]:
-        """Message text for a short UTF-8 Markdown file, else None (upload it as before)."""
-        if _Path(display_name).suffix.lower() not in (".md", ".markdown"):
-            return None
-        try:
-            if os.path.getsize(file_path) > cls.INLINE_MARKDOWN_MAX_CHARS * 4:
-                return None
-            body = _Path(file_path).read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError):
-            return None
-        if not body or len(body) > cls.INLINE_MARKDOWN_MAX_CHARS:
-            return None
-        header = f"📄 *{display_name}*"
-        return "\n\n".join(part for part in (caption, header, body) if part)
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         """Get information about a Slack channel."""
