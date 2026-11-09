@@ -387,7 +387,11 @@ _SLACK_VIA_HERMES_ONLY = frozenset({
     # Recovery-only, after a restart lost a turn: `/hermes discard` reaches it.
     "discard",
     # One-time answer to the low-disk prompt; `/hermes autoprune on` reaches it.
-    "autoprune"})
+    "autoprune",
+    # Demoted to free the 50th slot for the `reset` ALIAS of /new (users ask for /reset by
+    # name); `/hermes curator` reaches it. Keep this entry while the canonical list is at
+    # the cap, or the clamp drops every alias again.
+    "curator"})
 
 
 def _sanitize_slack_name(raw: str) -> str:
