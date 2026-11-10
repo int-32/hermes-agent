@@ -54,7 +54,7 @@ def board_repo(tmp_path):
 
 def _local_runner(pool, machine, script, *, timeout=120):
     """``run_script`` without the SSH hop."""
-    return subprocess.run(["bash", "-s"], input=script, capture_output=True, text=True, timeout=timeout,
+    return subprocess.run(["bash", "-s"], input=script, capture_output=True, text=True, timeout=timeout, check=False,
                           env={"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(Path.home()),
                                "GIT_AUTHOR_NAME": "K", "GIT_AUTHOR_EMAIL": "k@example.com",
                                "GIT_COMMITTER_NAME": "K", "GIT_COMMITTER_EMAIL": "k@example.com"})
@@ -132,7 +132,7 @@ def _running(conn, machine, n):
 
 def test_choose_machine_least_loaded_reachable(kanban_home):
     pool = _pool(m1=2, m2=2, m3=4)
-    m1, m2, m3 = pool.machines
+    m1, _m2, m3 = pool.machines
     up = {"m1": "/h1", "m2": None, "m3": "/h3"}
     with kbc.connect_closing() as conn:
         _running(conn, m1, 1)
