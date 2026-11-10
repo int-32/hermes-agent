@@ -157,7 +157,7 @@ def load_pool() -> Optional[Pool]:
 
     pool = None
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        raw = yaml.safe_load(path.read_text(encoding="utf-8-sig")) or {}
         kanban = raw.get("kanban") if isinstance(raw, Mapping) else None
         pool = parse_pool((kanban or {}).get("executor_pool") if isinstance(kanban, Mapping) else None)
     except (ValueError, OSError, yaml.YAMLError) as exc:
@@ -195,8 +195,8 @@ def run_script(pool: Pool, machine: Machine, script: str, *, timeout: int = 120)
     """Run a bash script on ``machine`` (fed on stdin, so no quoting through ssh's argv).
     ssh's own exit 255 means the connection failed -> :class:`ExecutorUnreachable`."""
     try:
-        result = subprocess.run(_ssh_argv(pool, machine), input=script, capture_output=True, text=True,
-                                encoding="utf-8", errors="replace",
+        result = subprocess.run(_ssh_argv(pool, machine), input=script, capture_output=True,
+                                text=True, encoding="utf-8", errors="replace",
                                 timeout=timeout, check=False)
     except subprocess.TimeoutExpired as exc:
         raise ExecutorUnreachable(f"{machine.name}: ssh timed out after {timeout}s") from exc
@@ -212,7 +212,7 @@ _probe_lock = threading.Lock()
 
 
 def remote_home(pool: Pool, machine: Machine, *, now: Optional[float] = None,
-                runner: Callable[..., subprocess.CompletedProcess] = None) -> Optional[str]:
+                runner: Optional[Callable[..., subprocess.CompletedProcess]] = None) -> Optional[str]:
     """The machine's home directory, or None when it is unreachable. Cached for
     ``PROBE_TTL_SECONDS`` either way, so a down machine costs one connect timeout a minute."""
     now = time.monotonic() if now is None else now
@@ -289,7 +289,7 @@ def running_by_machine(pool: Pool, conn, board: Optional[str]) -> dict[str, int]
 
 
 def choose_machine(pool: Pool, conn, board: Optional[str], *, prefer: Optional[Machine] = None,
-                   probe: Callable[[Pool, Machine], Optional[str]] = None) -> Optional[tuple[Machine, str]]:
+                   probe: Optional[Callable[[Pool, Machine], Optional[str]]] = None) -> Optional[tuple[Machine, str]]:
     """``(machine, remote_home)`` for the next task, or None when every machine is full or
     unreachable. ``prefer`` is the machine a retried task last ran on, where its worktree and any
     unpushed commits are: it wins when it has a slot, and while it is reachable but full the task
@@ -425,7 +425,7 @@ def origin_url(repo_root: Path) -> str:
 
 
 def prepare_worktree(pool: Pool, machine: Machine, home: str, repo_root: Path, task_id: str,
-                     branch: str, *, runner: Callable[..., subprocess.CompletedProcess] = None) -> str:
+                     branch: str, *, runner: Optional[Callable[..., subprocess.CompletedProcess]] = None) -> str:
     """Materialize the task's worktree on ``machine``; returns its ``ssh://`` URI."""
     repo = f"{machine_workdir(machine, home)}/{repo_root.name}"
     result = (runner or run_script)(pool, machine, prepare_script(repo, origin_url(repo_root), task_id, branch),
@@ -437,7 +437,7 @@ def prepare_worktree(pool: Pool, machine: Machine, home: str, repo_root: Path, t
 
 
 def cleanup_worktree(task_id: str, uri: str, branch_name: Optional[str], *, pool: Optional[Pool] = None,
-                     runner: Callable[..., subprocess.CompletedProcess] = None) -> Optional[str]:
+                     runner: Optional[Callable[..., subprocess.CompletedProcess]] = None) -> Optional[str]:
     """Best-effort removal of a finished task's remote worktree; returns the script's verdict
     (``removed`` / ``dirty`` / ``unmerged`` / ...) or None when it could not run."""
     pool = pool if pool is not None else load_pool()
