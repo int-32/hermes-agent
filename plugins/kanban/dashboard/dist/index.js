@@ -313,6 +313,19 @@
     return `${url}${sep}board=${encodeURIComponent(board)}`;
   }
 
+  // A pinned board this browser may not read — 403 from a reverse proxy that
+  // exposes only some boards (its HTML 403 page carries no ``detail``), 404
+  // for a board deleted or archived elsewhere — must fall back to "default"
+  // instead of rendering the load-failed card forever: the pin survives
+  // reloads in localStorage, that card has no board switcher, and the
+  // stale-slug fallback in loadBoardList never runs because /boards?board=
+  // is refused for the same reason.
+  function shouldResetPinnedBoard(err, board) {
+    if (!board || board === "default") return false;
+    const status = err && err.status;
+    return status === 403 || status === 404;
+  }
+
   // The SDK's Select component fires ``onValueChange(value)`` directly
   // (it's a shadcn-style popup, not a native <select>). Older plugin
   // code calls ``onChange({target: {value}})`` which silently never
@@ -642,6 +655,8 @@
     const [config, setConfig] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
+    // Notice for the next successful load after a refused pinned board fell back to default.
+    const boardFallbackRef = useRef(null);
 
     const [tenantFilter, setTenantFilter] = useState("");
     const [projectFilter, setProjectFilter] = useState("");
@@ -700,13 +715,28 @@
         .then(function (data) {
           setBoardData(data);
           cursorRef.current = data.latest_event_id || 0;
-          setError(null);
+          setError(boardFallbackRef.current);
+          boardFallbackRef.current = null;
+          setLoading(false);
         })
         .catch(function (err) {
-          setError(String(err && err.message ? err.message : err));
-        })
-        .finally(function () { setLoading(false); });
-    }, [tenantFilter, projectFilter, includeArchived, board]);
+          const message = String(err && err.message ? err.message : err);
+          if (shouldResetPinnedBoard(err, board)) {
+            // Stay in the loading state: the board change re-runs loadBoard,
+            // whose success shows this notice above the default board.
+            boardFallbackRef.current = tx(t, "boardFallback",
+              "Board \"{board}\" could not be opened ({reason}); showing the default board.",
+              { board: board, reason: message });
+            setBoardData(null);
+            setLoading(true);
+            setBoard("default");
+            writeSelectedBoard("default");
+            return;
+          }
+          setError(message);
+          setLoading(false);
+        });
+    }, [tenantFilter, projectFilter, includeArchived, board]);  // eslint-disable-line react-hooks/exhaustive-deps
 
     // --- load list of boards for the switcher ------------------------------
     const loadBoardList = useCallback(function () {
