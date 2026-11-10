@@ -1173,7 +1173,7 @@ def _handle_create(args: dict, **kw) -> str:
         wait = [e for e in kb.list_events(conn, new_tid) if e.kind == "dependency_wait"]
         gate = {"gated": True, "gated_by": wait[-1].payload["parent"]} if wait else {"gated": False}
         return _ok(task_id=new_tid, **landed, **gate,
-                   subscribed=_maybe_auto_subscribe(conn, new_tid))
+                   subscribed=_maybe_auto_subscribe(conn, new_tid, direct_reply=args.get("direct_reply") is True))
 
 
 def _live_tui_session_key(session_key: str, profile: Optional[str]) -> str:
@@ -1248,7 +1248,7 @@ def _resolve_notify_target() -> Optional[dict[str, Any]]:
         delivery_metadata=delivery_metadata or None)
 
 
-def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
+def _maybe_auto_subscribe(conn: Any, task_id: str, *, direct_reply: bool = False) -> bool:
     """Subscribe the calling session to completion/block events; True iff a row was
     written (surfaced as ``subscribed`` so an orchestrator can fall back to explicit
     ``kanban_notify-subscribe``). Gated by ``kanban.auto_subscribe_on_create`` (default
@@ -1270,13 +1270,14 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
                and (sub["thread_id"] or "") == (target["thread_id"] or "")
                for sub in _kbn.list_notify_subs(conn, task_id)):
             return True
-        # kanban.wake_only_assignees: the creator agent relays these workers' results itself,
-        # so the passive status ping (board, task id, assignee) would only duplicate it.
-        wake_only = cfg_get(load_config(), "kanban", "wake_only_assignees", default=None) or []
-        if target.get("delivery_mode") and wake_only:
-            row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
-            if row and row["assignee"] in wake_only:
-                target["delivery_mode"] = "wake"
+        # Direct reply (per task, or kanban.direct_reply_assignees): the gateway posts the
+        # completed summary verbatim instead of waking the creator to re-type it.
+        if target.get("delivery_mode") and not direct_reply:
+            direct = cfg_get(load_config(), "kanban", "direct_reply_assignees", default=None) or []
+            row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone() if direct else None
+            direct_reply = bool(row and row["assignee"] in direct)
+        if target.get("delivery_mode") and direct_reply:
+            target["delivery_mode"] = "direct"
         _kbn.add_notify_sub(conn, task_id=task_id, **target)
         return True
     except Exception as _exc:

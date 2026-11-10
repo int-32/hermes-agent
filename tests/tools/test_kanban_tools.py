@@ -1319,12 +1319,12 @@ def test_create_respects_auto_subscribe_on_create_false(monkeypatch, worker_env,
     assert _list_subs_for_task(d["task_id"]) == []
 
 
-def test_create_wake_only_assignees_subscribes_without_passive_ping(monkeypatch, worker_env, tmp_path):
-    """kanban.wake_only_assignees: tasks for those assignees auto-subscribe in "wake" mode
-    (creator agent is resumed, no status ping in the chat); other assignees keep notify+wake."""
+def test_create_direct_reply_subscribes_in_direct_mode(monkeypatch, worker_env, tmp_path):
+    """kanban.direct_reply_assignees / direct_reply=true auto-subscribe in "direct" mode
+    (summary posted verbatim, creator not resumed); other tasks keep notify+wake."""
     home = tmp_path / "wake-home" / ".hermes"
     home.mkdir(parents=True)
-    (home / "config.yaml").write_text("kanban:\n  wake_only_assignees: [desk]\n")
+    (home / "config.yaml").write_text("kanban:\n  direct_reply_assignees: [desk]\n")
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_SESSION_PLATFORM", "slack")
     monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "channel-1")
@@ -1336,7 +1336,10 @@ def test_create_wake_only_assignees_subscribes_without_passive_ping(monkeypatch,
         assert d["ok"] is True and d["subscribed"] is True, d
         (sub,) = _list_subs_for_task(d["task_id"])
         modes[assignee] = sub["delivery_mode"]
-    assert modes == {"desk": "wake", "peer": "notify+wake"}
+    assert modes == {"desk": "direct", "peer": "notify+wake"}
+    d = json.loads(kt._handle_create({"title": "one-off", "assignee": "peer", "direct_reply": True}))
+    (sub,) = _list_subs_for_task(d["task_id"])
+    assert sub["delivery_mode"] == "direct"
 
 
 def test_maybe_auto_subscribe_swallows_add_notify_sub_failure(monkeypatch, worker_env):
