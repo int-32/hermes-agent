@@ -1,4 +1,4 @@
-"""slack-channels plugin: Slack Code Channel creation and channel rename (toolset ``slack_admin``)."""
+"""Slack channel management and bot messaging (toolset ``slack_admin``)."""
 
 from __future__ import annotations
 
@@ -82,10 +82,50 @@ _RENAME_SCHEMA = {
 }
 
 
+_POST_SCHEMA = {
+    "name": "slack_post_message",
+    "description": (
+        "Post a message in a Slack public or private channel, optionally mentioning agent bots. "
+        "Defaults to the current Slack channel and thread (or triggering message). "
+        "Bots cannot DM each other. Returns ok, channel_id, ts, thread_ts and permalink; "
+        "on failure read error/message/action. Do not repeat a successful post."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "Message body (required)."},
+            "channel_id": {"type": "string", "description": "C/G channel ID; omit for the current Slack channel. No U/D targets."},
+            "thread_ts": {
+                "type": "string",
+                "description": 'Thread timestamp; omit for the current Slack thread, then triggering message. Only "none" posts top-level.',
+            },
+            "mention_user_ids": {
+                "type": "array", "items": {"type": "string", "pattern": "^U[A-Z0-9]{8,}$"},
+                "description": "User IDs to prepend as <@USER_ID> mentions in the supplied order.",
+            },
+        },
+        "required": ["text"],
+        "additionalProperties": False,
+    },
+}
+
+_LIST_AGENTS_SCHEMA = {
+    "name": "slack_list_agents",
+    "description": (
+        "List active Slack bot users in this workspace, excluding this bot and deleted users. "
+        "Use to resolve an agent bot's user ID for mentions. Returns an array of "
+        "{user_id, name, real_name, app_id}; on failure returns ok:false with error/message/action."
+    ),
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+}
+
+
 def register(ctx) -> None:
     for schema, handler, emoji in (
         (_CREATE_SCHEMA, impl.create_code_channel, "🧵"),
         (_RENAME_SCHEMA, impl.rename_channel, "🏷️"),
+        (_POST_SCHEMA, impl.post_message, "💬"),
+        (_LIST_AGENTS_SCHEMA, impl.list_agents, "🤖"),
     ):
         ctx.register_tool(
             name=schema["name"], toolset=_TOOLSET, schema=schema, handler=handler,

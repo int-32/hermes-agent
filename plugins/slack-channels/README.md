@@ -1,11 +1,13 @@
 # slack-channels
 
-Two tools in the `slack_admin` toolset, so an agent can give each task its own readable Slack channel:
+Tools in the `slack_admin` toolset for readable task channels and messaging agent bots:
 
 | Tool | What it does |
 |---|---|
 | `slack_create_code_channel` | Calls `agents.conversations.create` with the origin message, then posts the first message in the new channel |
 | `slack_rename_channel` | Calls `conversations.rename`, then reads the name back with `conversations.info` |
+| `slack_post_message` | Posts in a C/G channel and thread, with optional user mention prefixes; returns message timestamps and a best-effort permalink |
+| `slack_list_agents` | Lists active bot users across all `users.list` pages, excluding this bot and deleted users |
 
 ## Slack app setup
 
@@ -14,7 +16,8 @@ Bot token scopes:
 | Scope | Needed for |
 |---|---|
 | `code_channels:manage` | Creating a Code Channel |
-| `chat:write` | Posting the first message |
+| `chat:write` | Posting the first message and `slack_post_message` |
+| `users:read` | `slack_list_agents` |
 | `channels:manage` | Renaming public channels |
 | `groups:write` | Renaming private channels |
 | `channels:read` | Reading back the name of public channels |
@@ -89,9 +92,16 @@ if that turn has no message ID. The result has `origin_source: "session"` and sh
 `origin_unknown` also applies outside Slack and to a Slack slash command run outside a thread, which has no
 message to link to.
 
+For `slack_post_message`, `text` is required. Omitted `channel_id` comes from the current Slack channel;
+omitted `thread_ts` comes from the current Slack thread, then the triggering message ID. Defaults are only
+available in a Slack session. Pass `thread_ts: "none"` explicitly to post top-level; without a timestamp
+the tool refuses to send. Only C/G channel targets are accepted: bot-to-bot DMs (U/D targets) are unsupported.
+`mention_user_ids` is an array of IDs matching `^U[A-Z0-9]{8,}$`; mentions are prefixed in array order.
+
 ## Results
 
-Every tool returns JSON with `ok`. Failures add `error` (the Slack code when Slack gave one), `message` and
+`slack_list_agents` returns a JSON array of `{user_id, name, real_name, app_id}` on success. Other successes
+return JSON with `ok`. All failures add `ok:false`, `error` (the Slack code when Slack gave one), `message` and
 `action`, plus `needed`, `provided`, `arg` or `retry_after_seconds` when they apply.
 
 | Result | Meaning |
