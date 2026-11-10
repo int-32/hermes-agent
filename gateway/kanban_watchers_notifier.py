@@ -330,7 +330,10 @@ class _Collector:
         task = self.kb.get_task(conn, sub["task_id"])
         logger.debug("kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
                      len(events), sub["task_id"], slug, old_cursor, cursor)
-        return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task, "board": slug}
+        # "direct" posts the whole run summary; the event payload only carries its first line.
+        summary = self.kb.latest_summary(conn, sub["task_id"]) if sub.get("delivery_mode") == "direct" else None
+        return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task,
+                "board": slug, "summary": summary}
 
     def collect_board(self, slug: str) -> None:
         """Claim events on one board, appending delivery dicts to ``deliveries``."""
@@ -535,8 +538,11 @@ class _KanbanNotification:
         # The wake self-post path needs the key even when every event was skipped.
         self.sub_key = (sub["task_id"], sub["platform"], sub["chat_id"], sub.get("thread_id") or "")
         mode = sub.get("delivery_mode") or "notify"
-        self.wake_agent = mode in ("notify+wake", "wake")
+        self.wake_agent = mode in ("notify+wake", "wake", "direct")
         self.send_passive = mode != "wake"
+        # "direct": a completed summary is posted verbatim and replaces both the status
+        # ping and the wake for that event; every other kind is wake-only.
+        self.direct = mode == "direct"
         # Worker handoff carried into the synthetic wake turn so the woken
         # creator doesn't re-decompose work already on the board.
         self.wake_handoff = self.wake_review_detail = self.session_key = self.synth = ""
@@ -591,11 +597,38 @@ class _KanbanNotification:
             self.wake_review_detail = review_detail
         return msg
 
+    def direct_reply(self, ev: Any) -> Optional[str]:
+        """The verbatim text that replaces ping + wake for ``ev``, or None.
+
+        Only a completed event with a non-empty summary on a push adapter qualifies;
+        anything else falls back to waking the creator so no outcome goes silent.
+        """
+        if not (self.direct and self.is_push_adapter and ev.kind == "completed"):
+            return None
+        text = self.d.get("summary") or (self.task.result if self.task else None)
+        return str(text or "").strip() or None
+
+    async def _mirror_direct_reply(self, text: str) -> None:
+        """Record the direct reply in the creator's transcript so follow-ups have context.
+
+        Best effort (``mirror_to_session`` never raises). ``role="user"``: the text is the
+        worker's, and an assistant-role mirror would break strict-alternation providers.
+        """
+        from gateway.mirror import mirror_to_session
+        sub = self.sub
+        await asyncio.to_thread(
+            mirror_to_session, self.platform_str, sub["chat_id"],
+            f"[kanban {self.task_id}: result posted verbatim to this chat]\n{text}",
+            source_label="kanban", thread_id=sub.get("thread_id") or None,
+            user_id=sub.get("user_id"), role="user",
+        )
+
     def build_wake_text(self) -> None:
         """Set ``wake_kinds`` / ``session_key`` / ``synth`` for the wake paths."""
         task, sub = self.task, self.sub
-        self.wake_kinds = {kind for ev in self.d['events'] if (kind := _wake_kind(ev))} if self.wake_agent else set()
-        self.wake_diagnostic = all(diagnostic_event(ev) for ev in self.d['events'] if _wake_kind(ev))
+        wake_events = [ev for ev in self.d['events'] if _wake_kind(ev) and self.direct_reply(ev) is None]
+        self.wake_kinds = {_wake_kind(ev) for ev in wake_events} if self.wake_agent else set()
+        self.wake_diagnostic = all(diagnostic_event(ev) for ev in wake_events)
         if not self.wake_kinds:
             return
         if self.is_push_adapter:
@@ -744,14 +777,17 @@ class _KanbanNotification:
                     "on wake self-post instead", self.platform_str, self.task_id,
                 )
                 continue
-            if not self.send_passive:
+            direct_text = self.direct_reply(ev)
+            if not self.send_passive or (self.direct and direct_text is None):
                 # Wake-only: the wake path is the sole delivery and resolves the counter.
                 continue
             if ev.id <= self.sub.get("last_ping_event_id", 0):
                 continue
             try:
-                if await self._send_event(ev, msg) is False:
+                if await self._send_event(ev, direct_text or msg) is False:
                     continue
+                if direct_text:
+                    await self._mirror_direct_reply(direct_text)
                 await _to_thread_process_service(partial(
                     self.runner._kanban_sub_op, self.board_slug, "record_notify_ping", self.sub,
                     event_id=ev.id,

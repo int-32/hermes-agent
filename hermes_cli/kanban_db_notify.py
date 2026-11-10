@@ -22,8 +22,10 @@ if TYPE_CHECKING:
 
 
 # Notifier reaction to a terminal event: "notify" = passive adapter.send only
-# (default); "notify+wake" = send AND wake the destination agent; "wake" = wake only.
-_NOTIFY_DELIVERY_MODES = ("notify", "notify+wake", "wake")
+# (default); "notify+wake" = send AND wake the destination agent; "wake" = wake only;
+# "direct" = post a completed task's summary verbatim (no status head, no wake) and
+# wake the agent for every other kind.
+_NOTIFY_DELIVERY_MODES = ("notify", "notify+wake", "wake", "direct")
 
 _SCALAR_TYPES = (str, int, float, bool)
 

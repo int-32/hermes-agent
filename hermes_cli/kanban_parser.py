@@ -414,7 +414,9 @@ _SPECS = [
                   "subscription: 'notify' (passive message only; default), "
                   "'notify+wake' (message AND wake the destination gateway agent so "
                   "it reads the full board context and replies in its own voice), or "
-                  "'wake' (wake the agent only, no passive message). Omit to leave an "
+                  "'wake' (wake the agent only, no passive message), or 'direct' (post a "
+                  "completed task's summary verbatim without waking the agent; other "
+                  "events wake it). Omit to leave an "
                   "existing subscription's mode unchanged (new subs default to 'notify')."),
     ], help="Subscribe a gateway source to a task's terminal events (used by /kanban subscribe in the gateway adapter)"),
     _cmd("notify-list", [_arg("task_id", nargs="?"), _json_flag()],

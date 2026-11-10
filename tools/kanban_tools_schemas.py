@@ -458,6 +458,13 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "— a specifier profile is expected to flesh out "
                 "the body before work starts."
         )),
+        "direct_reply": _prop("boolean", (
+                "If true, the task's completion summary is posted "
+                "verbatim to the chat that created it and you are "
+                "not resumed to relay it. Failures and blocks still "
+                "resume you. Use for read-only answers whose "
+                "summary is the reply."
+        )),
         "idempotency_key": _prop("string", (
                 "If a non-archived task with this key already "
                 "exists, return that task's id instead of creating "
