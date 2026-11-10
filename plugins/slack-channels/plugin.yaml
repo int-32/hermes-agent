@@ -1,8 +1,10 @@
 name: slack-channels
 version: 0.1.0
-description: "Create Slack Code Channels linked to their origin message and rename channels, with read-back and structured permission errors."
+description: "Manage Slack task channels, post threaded messages and discover agent bots, with structured permission errors."
 author: int-32
 kind: standalone
 provides_tools:
   - slack_create_code_channel
   - slack_rename_channel
+  - slack_post_message
+  - slack_list_agents

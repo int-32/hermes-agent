@@ -1,10 +1,11 @@
-"""Handlers for the slack_admin tools. Every outcome is a JSON string with ``ok``; failures add ``error`` (the
+"""Handlers for slack_admin. Successes are JSON objects (or an agent array); failures add ``ok:false``, ``error`` (the
 Slack code when Slack gave one), ``message`` and ``action``. The bot token is read per call from the active
 profile scope and never reaches a return value."""
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Callable, Optional
 
 from agent.retry_utils import parse_retry_after_seconds
@@ -21,6 +22,7 @@ _CODE_CHANNEL_NOT_ENABLED = (
 )
 _CREATE_SCOPES = f"Add the code_channels:manage bot scope, {_REINSTALL}."
 _POST_SCOPES = f"Add the chat:write bot scope, {_REINSTALL}."
+_USERS_SCOPES = f"Add the users:read bot scope, {_REINSTALL}."
 _RENAME_SCOPES = (
     f"Add the bot scope for the channel type (public: channels:manage, private: groups:write), {_REINSTALL}."
 )
@@ -201,7 +203,7 @@ def _open_caller() -> Callable[..., Any]:
     return call
 
 
-def _result(payload: dict) -> str:
+def _result(payload: dict | list) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -220,6 +222,100 @@ def _missing_args(*names: str) -> str:
 
 def token_configured() -> bool:
     return bool(get_secret(_TOKEN_ENV))
+
+
+def _message_target(args: dict) -> tuple[str, Optional[str]]:
+    channel = _text(args, "channel_id")
+    thread = _text(args, "thread_ts")
+    if channel.startswith(("U", "D")):
+        raise _SlackFailure(
+            "invalid_target", message="Bots cannot DM other bots (U/D targets).",
+            action="Use a public or private C/G channel ID shared by the bots.",
+        )
+    if "channel_id" not in args or "thread_ts" not in args:
+        if get_session_env("HERMES_SESSION_PLATFORM") != "slack":
+            raise _SlackFailure(
+                "invalid_arguments", message="Channel and thread defaults require a current Slack conversation.",
+                action='Pass channel_id and thread_ts explicitly ("none" for a top-level message), or call from Slack.',
+            )
+        if "channel_id" not in args:
+            channel = get_session_env("HERMES_SESSION_CHAT_ID") or ""
+        if "thread_ts" not in args:
+            thread = get_session_env("HERMES_SESSION_THREAD_ID") or get_session_env("HERMES_SESSION_MESSAGE_ID") or ""
+    if not re.fullmatch(r"[CG][A-Z0-9]+", channel):
+        raise _SlackFailure(
+            "invalid_target", message="Only C/G channel IDs are supported. Bots cannot DM other bots (U/D targets).",
+            action="Use a public or private channel ID shared by the bots.",
+        )
+    if not thread:
+        raise _SlackFailure(
+            "invalid_arguments", message="No thread timestamp is available.",
+            action='Pass thread_ts, or pass the string "none" explicitly to post a top-level message.',
+        )
+    return channel, None if thread == "none" else thread
+
+
+def post_message(args: dict, **_kwargs: Any) -> str:
+    text = _text(args, "text")
+    if not text:
+        return _missing_args("text")
+    mentions = args.get("mention_user_ids", [])
+    if not isinstance(mentions, list) or any(
+        not isinstance(user, str) or not re.fullmatch(r"U[A-Z0-9]{8,}", user) for user in mentions
+    ):
+        return _result({
+            "ok": False, "error": "invalid_arguments", "message": "mention_user_ids must be an array of Slack user IDs.",
+            "action": "Use IDs matching ^U[A-Z0-9]{8,}$, not names or mention markup.",
+        })
+    if mentions:
+        text = " ".join(f"<@{user}>" for user in mentions) + " " + text
+    try:
+        channel, thread = _message_target(args)
+        call = _open_caller()
+        params = {"channel": channel, "text": text}
+        if thread is not None:
+            params["thread_ts"] = thread
+        response = call("chat.postMessage", **params)
+    except _SlackFailure as failure:
+        return _result(failure.payload(_POST_SCOPES))
+    ts = response.get("ts")
+    if not ts:
+        return _result({
+            "ok": False, "error": "unexpected_response", "message": "Slack accepted the post but returned no ts.",
+            "action": "Check the channel before retrying; the message may already have been posted.",
+        })
+    # A link lookup must not make an already-posted message look safe to retry.
+    try:
+        permalink = call("chat.getPermalink", channel=channel, message_ts=ts).get("permalink")
+    except _SlackFailure:
+        permalink = None
+    return _result({"ok": True, "channel_id": channel, "ts": ts, "thread_ts": thread, "permalink": permalink})
+
+
+def list_agents(args: dict, **_kwargs: Any) -> str:
+    try:
+        call = _open_caller()
+        self_id = call("auth.test").get("user_id")
+        agents = []
+        params: dict = {"limit": 200}
+        while True:
+            response = call("users.list", **params)
+            for member in response.get("members", []):
+                if not member.get("is_bot") or member.get("deleted") or member.get("id") == self_id:
+                    continue
+                profile = member.get("profile") or {}
+                agents.append({
+                    "user_id": member.get("id"), "name": member.get("name", ""),
+                    "real_name": member.get("real_name") or profile.get("real_name", ""),
+                    "app_id": profile.get("api_app_id") or member.get("app_id", ""),
+                })
+            cursor = (response.get("response_metadata") or {}).get("next_cursor", "").strip()
+            if not cursor:
+                break
+            params = {"limit": 200, "cursor": cursor}
+    except _SlackFailure as failure:
+        return _result(failure.payload(_USERS_SCOPES))
+    return _result(agents)
 
 
 def _read_name(call: Callable[..., Any], channel_id: str) -> str:
