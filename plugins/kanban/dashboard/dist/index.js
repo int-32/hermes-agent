@@ -657,6 +657,8 @@
     const [error, setError] = useState(null);
     // Notice for the next successful load after a refused pinned board fell back to default.
     const boardFallbackRef = useRef(null);
+    // switchBoard is declared below the loaders that fall back through it.
+    const switchBoardRef = useRef(null);
 
     const [tenantFilter, setTenantFilter] = useState("");
     const [projectFilter, setProjectFilter] = useState("");
@@ -722,15 +724,13 @@
         .catch(function (err) {
           const message = String(err && err.message ? err.message : err);
           if (shouldResetPinnedBoard(err, board)) {
-            // Stay in the loading state: the board change re-runs loadBoard,
-            // whose success shows this notice above the default board.
+            // switchBoard keeps the loading state and drops board X's filters
+            // (a project_id/tenant of X would filter default to nothing); the
+            // reload it triggers shows this notice above the default board.
             boardFallbackRef.current = tx(t, "boardFallback",
               "Board \"{board}\" could not be opened ({reason}); showing the default board.",
               { board: board, reason: message });
-            setBoardData(null);
-            setLoading(true);
-            setBoard("default");
-            writeSelectedBoard("default");
+            switchBoardRef.current("default");
             return;
           }
           setError(message);
@@ -753,8 +753,7 @@
           // deleted in the CLI while dashboard was open), fall back to
           // default so the UI doesn't hang on a 404.
           if (board && board !== "default" && !boards.find(function (b) { return b.slug === board; })) {
-            setBoard("default");
-            writeSelectedBoard("default");
+            switchBoardRef.current("default");
           }
         })
         .catch(function () { /* non-fatal */ });
@@ -1214,6 +1213,7 @@
       setIncludeArchived(false);
       clearSelected();
     }, [board, clearSelected]);
+    switchBoardRef.current = switchBoard;
 
     const createNewBoard = useCallback(function (payload) {
       return SDK.fetchJSON(`${API}/boards`, {

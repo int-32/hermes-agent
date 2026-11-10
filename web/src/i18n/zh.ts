@@ -616,6 +616,7 @@ export const zh: Translations = {
     loadFailed: "加载看板失败：",
     loadFailedHint:
       "后端会在首次读取时自动创建 kanban.db。如果问题持续，请检查仪表盘日志。",
+    boardFallback: "无法打开看板“{board}”（{reason}），已切换到默认看板。",
     board: "看板",
     newBoard: "+ 新建看板",
     newBoardTitle: "新建看板",

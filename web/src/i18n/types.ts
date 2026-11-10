@@ -745,6 +745,8 @@ export interface Translations {
     loading: string;
     loadFailed: string;
     loadFailedHint: string;
+    /** Optional — English fallback in the plugin bundle until translated. "{board}" = slug, "{reason}" = error. */
+    boardFallback?: string;
     board: string;
     newBoard: string;
     newBoardTitle: string;

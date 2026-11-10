@@ -742,6 +742,8 @@ export const en: Translations = {
     loadFailed: "Failed to load Kanban board: ",
     loadFailedHint:
       "The backend auto-creates kanban.db on first read. If this persists, check the dashboard logs.",
+    boardFallback:
+      'Board "{board}" could not be opened ({reason}); showing the default board.',
     board: "Board",
     newBoard: "+ New board",
     newBoardTitle: "New board",
