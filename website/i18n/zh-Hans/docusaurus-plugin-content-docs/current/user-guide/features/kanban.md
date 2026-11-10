@@ -436,6 +436,7 @@ hermes dashboard        # 导航栏中出现 "Kanban" 标签页，位于 "Skills
 | `orchestrator_profile` | `""` | 拥有分解权的配置文件。空 = 回退到活动默认配置文件。 |
 | `default_assignee` | `""` | LLM 选择未知配置文件时子任务的落地位置。空 = 回退到活动默认配置文件。 |
 | `auto_subscribe_on_create` | `true` | 当 `kanban_create` 在持久 gateway/TUI 会话中运行时，终止事件会通过合成状态回合恢复原始 agent。设为 `false` 可让完成保持被动，或要求显式调用 `kanban_notify-subscribe`。此设置独立于 `auto_decompose`。 |
+| `wake_only_assignees` | `[]` | 列出的执行者 profile，其任务的自动订阅使用 `wake` 投递：只唤醒创建任务的 agent 由它转达结果，不再向聊天发送带看板、任务 ID 和执行者的状态通知。 |
 
 以及两个辅助 LLM 槽：
 

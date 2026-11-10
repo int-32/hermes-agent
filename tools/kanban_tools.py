@@ -1270,6 +1270,13 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
                and (sub["thread_id"] or "") == (target["thread_id"] or "")
                for sub in _kbn.list_notify_subs(conn, task_id)):
             return True
+        # kanban.wake_only_assignees: the creator agent relays these workers' results itself,
+        # so the passive status ping (board, task id, assignee) would only duplicate it.
+        wake_only = cfg_get(load_config(), "kanban", "wake_only_assignees", default=None) or []
+        if target.get("delivery_mode") and wake_only:
+            row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row and row["assignee"] in wake_only:
+                target["delivery_mode"] = "wake"
         _kbn.add_notify_sub(conn, task_id=task_id, **target)
         return True
     except Exception as _exc:
