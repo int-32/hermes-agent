@@ -83,6 +83,9 @@ def _wake_kind(ev):
 # every 5 seconds forever. A genuinely dead chat still drops, just ~60s later — a fine trade for an
 # unattended gate where a false drop means silent work pileup.
 MAX_SEND_FAILURES = 12
+# A "direct" reply that keeps failing to send falls back to waking the creator after this
+# many consecutive failures, so the result is not lost with a dropped subscription.
+DIRECT_SEND_FALLBACK_FAILURES = 3
 
 _LOCAL_PATH_RE = re.compile(r"(?<![\w:/])(?:/(?:Users|home|private|tmp|var|etc|workspace)/[^\s,;]+|" r"[A-Za-z]:\\[^\s,;]+)")
 
@@ -601,9 +604,12 @@ class _KanbanNotification:
         """The verbatim text that replaces ping + wake for ``ev``, or None.
 
         Only a completed event with a non-empty summary on a push adapter qualifies;
-        anything else falls back to waking the creator so no outcome goes silent.
+        anything else — including a send that keeps failing — falls back to waking the
+        creator so no outcome goes silent.
         """
         if not (self.direct and self.is_push_adapter and ev.kind == "completed"):
+            return None
+        if self.sub_fail_counts.get(self.sub_key, 0) >= DIRECT_SEND_FALLBACK_FAILURES:
             return None
         text = self.d.get("summary") or (self.task.result if self.task else None)
         return str(text or "").strip() or None
@@ -618,7 +624,7 @@ class _KanbanNotification:
         sub = self.sub
         await asyncio.to_thread(
             mirror_to_session, self.platform_str, sub["chat_id"],
-            f"[kanban {self.task_id}: result posted verbatim to this chat]\n{text}",
+            f"[kanban] Task {self.task_id}: result already posted verbatim to this chat; do not relay it again.\n{text}",
             source_label="kanban", thread_id=sub.get("thread_id") or None,
             user_id=sub.get("user_id"), role="user",
         )

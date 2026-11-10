@@ -241,6 +241,7 @@ def test_direct_completed_posts_summary_verbatim_without_wake(tmp_path, monkeypa
     assert _unseen_terminal_events(tid) == []
     (args, kwargs), = mirrored
     assert args[:2] == ("telegram", "chat-1") and args[2].endswith(SUMMARY) and tid in args[2]
+    assert args[2].startswith("[kanban] ")
     assert kwargs["role"] == "user"
 
     runner._running = True
@@ -260,3 +261,28 @@ def test_direct_non_completed_event_wakes_creator(tmp_path, monkeypatch):
 
     assert adapter.sent == []
     assert len(adapter.handled) == 1
+
+
+class FailingSendAdapter(RecordingAdapter):
+    async def send(self, chat_id, text, metadata=None):
+        raise RuntimeError("simulated send failure")
+
+
+def test_direct_send_failures_fall_back_to_wake(tmp_path, monkeypatch):
+    """direct: a reply that keeps failing to send is handed to the creator via a wake
+    instead of dying silently with the dropped subscription."""
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "direct-fail.db"))
+    kb.init_db()
+    tid = _make_direct_task()
+
+    adapter = FailingSendAdapter()
+    runner = _make_runner(adapter)
+    for _ in range(3):
+        runner._running = True
+        asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert adapter.handled == [] and len(_unseen_terminal_events(tid)) == 1
+
+    runner._running = True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert len(adapter.handled) == 1, "fourth tick wakes the creator"
+    assert _unseen_terminal_events(tid) == [] and len(_subs(tid)) == 1
