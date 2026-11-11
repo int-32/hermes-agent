@@ -2209,7 +2209,8 @@ class FeishuAdapter(BasePlatformAdapter):
             if action_value.get("hermes_update_prompt_action"):
                 return self._handle_update_prompt_card_action(event=event, action_value=action_value, loop=loop)
             if action_value.get("hermes_plugin_action"):
-                return self._handle_plugin_card_action(event=event, action_value=action_value)
+                from plugins.platforms.feishu.card_actions import handle_plugin_card_action
+                return self._card_response(handle_plugin_card_action(event, action_value))
         self._submit_on_loop(loop, self._handle_card_action_event(data))
         return self._card_response()
 
@@ -2296,30 +2297,6 @@ class FeishuAdapter(BasePlatformAdapter):
         if not self._submit_on_loop(loop, coro):
             return self._card_response()
         return self._card_response(self._build_resolved_approval_card(choice=choice, user_name=user_name))
-
-    def _handle_plugin_card_action(self, *, event: Any, action_value: dict[str, Any]) -> Any:
-        """Run the plugin handler registered for ``hermes_plugin_action`` and return its card inline.
-
-        The click is consumed here: it is never routed to an agent, with or without a handler.
-        """
-        key = str(action_value.get("hermes_plugin_action") or "")
-        open_id = str(getattr(getattr(event, "operator", None), "open_id", "") or "")
-        try:
-            from hermes_cli.plugins import get_plugin_manager
-            found = get_plugin_manager().get_feishu_card_action_handler(key)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("[Feishu] Could not load plugin card action handlers: %s", exc)
-            found = None
-        if found is None:
-            logger.warning("[Feishu] No plugin handler for card action %r, dropping click", key)
-            return self._card_response()
-        callback, plugin_name = found
-        try:
-            card = callback(open_id, dict(action_value))
-        except Exception as exc:
-            logger.error("[Feishu] Plugin '%s' card action handler raised: %s", plugin_name, exc, exc_info=True)
-            return self._card_response()
-        return self._card_response(card if isinstance(card, dict) else None)
 
     def _handle_update_prompt_card_action(self, *, event: Any, action_value: dict[str, Any], loop: Any) -> Any:
         """Schedule update prompt resolution and build the synchronous callback response."""

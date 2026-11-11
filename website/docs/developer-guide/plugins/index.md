@@ -2007,6 +2007,8 @@ This is the public way for plugins to participate in Slack interactivity. Older 
 A plugin that sends a Feishu interactive card can handle its button clicks in code. Put `{"hermes_plugin_action": "<key>", ...}` in each button's `value` and register a handler for that key:
 
 ```python
+from plugins.platforms.feishu.card_actions import register_card_action_handler
+
 def register(ctx):
     def _on_click(open_id, value):
         # open_id: who clicked. value: the button's value dict.
@@ -2014,7 +2016,7 @@ def register(ctx):
         # optionally return a card dict to replace the clicked card.
         return {"elements": [{"tag": "markdown", "content": "Recorded"}]}
 
-    ctx.register_feishu_card_action_handler("my_plugin_choice", _on_click)
+    register_card_action_handler("my_plugin_choice", _on_click)
 ```
 
 The callback runs synchronously inside the Feishu SDK callback, so keep it short. A returned dict replaces the card inline for every client; returning `None` leaves the card as it is. The click is consumed by the handler and never reaches an agent. If the handler raises, or no handler is registered for the key, the click is logged and dropped. Check `open_id` yourself when only some people may answer.
