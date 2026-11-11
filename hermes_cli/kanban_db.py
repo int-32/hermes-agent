@@ -122,7 +122,7 @@ class ApprovalRequiredError(ValueError):
         super().__init__(
             f"{task_id} is waiting for human approval; {op} cannot release it. "
             f"Only a configured approver can (chat: `/kanban approve {task_id}`; "
-            f"terminal: `hermes kanban approve {task_id}`; or the dashboard).")
+            f"terminal: `hermes kanban --board <board> approve {task_id}`; or the dashboard).")
         self.task_id = task_id
 
 # Same-reason block -> unblock -> re-block cycles before routing to ``triage``.

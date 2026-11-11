@@ -1385,6 +1385,24 @@ class GatewaySlashCommandsMixin(
         return t("gateway.update.starting")
 
 
+def _kanban_board_of(task_id: str):
+    """Slug of the one active board holding *task_id*; None when no board has it
+    (the caller then reports "not found" on the current board), False when several do.
+    Lets ``/kanban approve <id>`` work without ``--board`` for tasks on any board."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli.kanban_db_boards import list_boards
+    hits = []
+    for meta in list_boards(include_archived=False):
+        try:
+            with kbc.connect_closing(board=meta["slug"]) as conn:
+                if kb.get_task(conn, task_id) is not None:
+                    hits.append(meta["slug"])
+        except Exception as exc:  # one unreadable board must not hide the others
+            logger.warning("kanban approve: skipping board %s (%s)", meta.get("slug"), exc)
+    return hits[0] if len(hits) == 1 else (False if hits else None)
+
+
 def _kanban_chat_approve(event: MessageEvent, text: str, requested_board: Optional[str]) -> str:
     """``/kanban approve <id>``: release an ``approval`` block when the sender is a
     configured approver. Decided here in code from the platform sender id, never by a
@@ -1413,7 +1431,12 @@ def _kanban_chat_approve(event: MessageEvent, text: str, requested_board: Option
         return f"⛔ {tid} not approved: only a configured approver (kanban.approvers) can approve it."
     from hermes_cli import kanban_db_connect as kbc
     try:
-        with kbc.connect_closing(board=requested_board or None) as conn:
+        board = requested_board or _kanban_board_of(tid)
+        if board is False:
+            return f"{tid} is on more than one board; add --board <slug>."
+        with kbc.connect_closing(board=board) as conn:
+            if kb.get_task(conn, tid) is None:
+                return f"{tid} not found" + (f" on board {board!r}." if requested_board else " on any board.")
             if not kb.approve_task(conn, tid, approver=sender):
                 return f"{tid} is not waiting for approval."
             task = kb.get_task(conn, tid)
