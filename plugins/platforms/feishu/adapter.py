@@ -2187,6 +2187,9 @@ class FeishuAdapter(BasePlatformAdapter):
                 return self._handle_approval_card_action(event=event, action_value=action_value, loop=loop)
             if action_value.get("hermes_update_prompt_action"):
                 return self._handle_update_prompt_card_action(event=event, action_value=action_value, loop=loop)
+            if action_value.get("hermes_plugin_action"):
+                from plugins.platforms.feishu.card_actions import handle_plugin_card_action
+                return self._card_response(handle_plugin_card_action(event, action_value))
         self._submit_on_loop(loop, self._handle_card_action_event(data))
         return self._card_response()
 

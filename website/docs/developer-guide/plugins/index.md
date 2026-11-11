@@ -2002,6 +2002,25 @@ def register(ctx):
 
 This is the public way for plugins to participate in Slack interactivity. Older plugins may patch `SlackAdapter.connect`; prefer this API instead. For the full slack_bolt surface (events, shortcuts, commands — not just Block Kit actions), use the generic `register_platform_handler("slack", ...)` below.
 
+### Handle Feishu card button clicks
+
+A plugin that sends a Feishu interactive card can handle its button clicks in code. Put `{"hermes_plugin_action": "<key>", ...}` in each button's `value` and register a handler for that key:
+
+```python
+from plugins.platforms.feishu.card_actions import register_card_action_handler
+
+def register(ctx):
+    def _on_click(open_id, value):
+        # open_id: who clicked. value: the button's value dict.
+        # Do fast, deterministic work here (no model calls), then
+        # optionally return a card dict to replace the clicked card.
+        return {"elements": [{"tag": "markdown", "content": "Recorded"}]}
+
+    register_card_action_handler("my_plugin_choice", _on_click)
+```
+
+The callback runs synchronously inside the Feishu SDK callback, so keep it short. A returned dict replaces the card inline for every client; returning `None` leaves the card as it is. The click is consumed by the handler and never reaches an agent. If the handler raises, or no handler is registered for the key, the click is logged and dropped. Check `open_id` yourself when only some people may answer.
+
 ### Register native platform handlers (any platform)
 
 Plugins that need to receive platform events the core adapter doesn't route — extra update types, native button callbacks, reaction/member events, webhook routes — can register a handler factory that the platform's adapter invokes at connect time. This works on **every** gateway platform.
