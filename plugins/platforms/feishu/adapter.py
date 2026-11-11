@@ -322,6 +322,7 @@ class FeishuAdapterSettings:
     allow_bots: str = "none"  # "none" | "mentions" | "all"
     require_mention: bool = True
     allow_all_dm: bool = False  # resolved per-profile so multiplexed adapters honor their own .env
+    auto_thread: bool = False  # every top-level message opens its own topic (Slack-style threads)
 
 
 @dataclass
@@ -1418,6 +1419,7 @@ class FeishuAdapter(BasePlatformAdapter):
             default_group_policy=str(extra.get("default_group_policy", "")).strip().lower(),
             group_rules=group_rules, allow_bots=allow_bots, allow_all_dm=allow_all_dm,
             require_mention=_to_boolean(extra.get("require_mention", _get_scoped_secret("FEISHU_REQUIRE_MENTION", "true"))),
+            auto_thread=_to_boolean(extra.get("auto_thread", _get_scoped_secret("FEISHU_AUTO_THREAD", "false"))),
         )
 
     def _apply_settings(self, settings: FeishuAdapterSettings) -> None:
@@ -2633,6 +2635,11 @@ class FeishuAdapter(BasePlatformAdapter):
         # too, so using it as a fallback (#19711) turned ordinary quote replies into topic
         # sessions and pushed the bot's answer into a fresh thread (#20548).
         thread_id = getattr(message, "thread_id", None) or None
+        if getattr(self, "_auto_thread", False):
+            # A topic is keyed by its root message id: a top-level message becomes the root of the
+            # topic our reply opens, and later messages in that topic carry it as root_id. Keying
+            # both the same way keeps one session per topic from the first message on.
+            thread_id = (getattr(message, "root_id", None) or message_id) if thread_id else message_id
         reply_to_message_id = (
             getattr(message, "parent_id", None) or getattr(message, "upper_message_id", None)
             or getattr(message, "root_id", None) or None
@@ -3748,6 +3755,10 @@ class FeishuAdapter(BasePlatformAdapter):
     ) -> Any:
         thread_id = (metadata or {}).get("thread_id")
         effective_reply_to = reply_to or ((metadata or {}).get("reply_to_message_id") if thread_id else None)
+        if not effective_reply_to and str(thread_id or "").startswith("om_"):
+            # auto_thread keys a topic by its root message id; replying to the root in-thread
+            # lands in that topic (create() only accepts native ``omt_`` thread ids).
+            effective_reply_to = thread_id
         if effective_reply_to:
             body = self._build_reply_message_body(
                 content=payload, msg_type=msg_type, reply_in_thread=bool(thread_id), uuid_value=str(uuid.uuid4()),
