@@ -101,6 +101,10 @@ from gateway.platforms._shared import (
     apply_yaml_bridge as _apply_yaml_bridge, extra_or_secret as _shared_extra_or_secret,
     get_scoped_secret as _get_scoped_secret, send_error
 )
+from plugins.platforms.feishu.notice_card import (
+    _card, _card_button, build_notice_card, build_resolved_approval_card, build_resolved_update_prompt_card,
+    build_update_prompt_card, notice_report_file,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -168,11 +172,6 @@ _FEISHU_CARD_ACTION_DEDUP_TTL_SECONDS = 15 * 60    # card action token dedup win
 
 _APPROVAL_CHOICE_MAP: dict[str, str] = {
     "approve_once": "once", "approve_session": "session", "approve_always": "always", "deny": "deny",
-}
-# choice → catalog key of the resolved-card title; looked up through ``t()`` at resolve time.
-_APPROVAL_LABEL_KEYS: dict[str, str] = {
-    "once": "platform.feishu.approval.resolved_once", "session": "platform.feishu.approval.resolved_session",
-    "always": "platform.feishu.approval.resolved_always", "deny": "platform.feishu.approval.resolved_deny",
 }
 
 
@@ -1259,22 +1258,6 @@ def _build_lark_client(app_id: str, app_secret: str, sdk_domain: Any) -> Any:
     return lark.Client.builder().app_id(app_id).app_secret(app_secret).domain(sdk_domain).log_level(lark.LogLevel.WARNING).build()
 
 
-def _card_button(label: str, btn_type: str, value: dict[str, Any]) -> dict[str, Any]:
-    return {"tag": "button", "text": {"tag": "plain_text", "content": label}, "type": btn_type, "value": value}
-
-
-def _card(title: str, template: str, markdown: str, *, actions: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
-    """Wide interactive card: colored header + one markdown block (+ an optional button row)."""
-    elements: list[dict[str, Any]] = [{"tag": "markdown", "content": markdown}]
-    if actions is not None:
-        elements.append({"tag": "action", "actions": actions})
-    return {
-        "config": {"wide_screen_mode": True},
-        "header": {"title": {"content": title, "tag": "plain_text"}, "template": template},
-        "elements": elements,
-    }
-
-
 def _sdk_build(request_cls: Any, **fields: Any) -> Any:
     """``request_cls.builder().<field>(value)...build()``; SimpleNamespace when the SDK is unbound."""
     if request_cls is None:
@@ -1813,16 +1796,28 @@ class FeishuAdapter(BasePlatformAdapter):
             }
         return result
 
-    @staticmethod
-    def _build_update_prompt_card(*, prompt: str, default: str, prompt_id: int) -> dict[str, Any]:
-        default_hint = t("platform.feishu.update_prompt.default_hint", default=default) if default else ""
-
-        def _btn(label: str, answer: str, btn_type: str) -> dict:
-            return _card_button(label, btn_type, {"hermes_update_prompt_action": answer, "update_prompt_id": prompt_id})
-
-        actions = [_btn(t("platform.feishu.update_prompt.answer_yes"), "y", "primary"),
-                   _btn(t("platform.feishu.update_prompt.answer_no"), "n", "danger")]
-        return _card(t("platform.feishu.update_prompt.title"), "orange", f"{prompt}{default_hint}", actions=actions)
+    async def send_structured_notice(
+        self, chat_id: str, notice: Any, metadata: Optional[dict[str, Any]] = None,
+    ) -> SendResult:
+        """Button-less kanban outcome card; a body over the card budget also goes out whole as a ``.md``."""
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+        card, overflow = build_notice_card(notice)
+        response = await self._feishu_send_with_retry(
+            chat_id=chat_id, msg_type="interactive", payload=json.dumps(card, ensure_ascii=False),
+            reply_to=None, metadata=metadata,
+        )
+        result = self._finalize_send_result(response, "send_structured_notice failed")
+        if result.success and overflow:
+            # The card is out: an attachment failure must not raise, or the notifier re-sends as text.
+            try:
+                with notice_report_file(notice, overflow) as (path, file_name):
+                    doc = await self.send_document(chat_id, path, file_name=file_name, metadata=metadata)
+            except OSError as exc:
+                doc = SendResult(success=False, error=str(exc))
+            if not doc.success:
+                logger.warning("[Feishu] notice report attachment failed: %s", doc.error)
+        return result
 
     async def send_update_prompt(
         self, chat_id: str, prompt: str, default: str = "", session_key: str = "",
@@ -1833,7 +1828,7 @@ class FeishuAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
         try:
             prompt_id = next(self._update_prompt_counter)
-            card = self._build_update_prompt_card(prompt=prompt, default=default, prompt_id=prompt_id)
+            card = build_update_prompt_card(prompt=prompt, default=default, prompt_id=prompt_id)
             return await self._send_interactive_card(
                 chat_id, card, metadata, "send_update_prompt failed",
                 state_map=self._update_prompt_state, state_id=prompt_id, session_key=session_key,
@@ -1841,22 +1836,6 @@ class FeishuAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning("[Feishu] send_update_prompt failed: %s", exc)
             return SendResult(success=False, error=str(exc))
-
-    @staticmethod
-    def _build_resolved_approval_card(*, choice: str, user_name: str) -> dict[str, Any]:
-        """Raw card JSON shown in place of the buttons once an approval is resolved."""
-        icon = "❌" if choice == "deny" else "✅"
-        key = _APPROVAL_LABEL_KEYS.get(choice, "platform.feishu.approval.resolved_fallback")
-        label = t(key)
-        return _card(f"{icon} {label}", "red" if choice == "deny" else "green",
-                     t("platform.feishu.approval.resolved_by_user", icon=icon, label=label, user=user_name))
-
-    @staticmethod
-    def _build_resolved_update_prompt_card(*, answer: str, user_name: str) -> dict[str, Any]:
-        yes = answer == "y"
-        title = t("platform.feishu.update_prompt.answered_title", icon="✅" if yes else "❌",
-                  answer=t("platform.feishu.update_prompt.word_yes" if yes else "platform.feishu.update_prompt.word_no"))
-        return _card(title, "green" if yes else "red", t("platform.feishu.update_prompt.answered_by", user=user_name))
 
     @staticmethod
     def _write_update_prompt_response(answer: str) -> None:
@@ -2293,7 +2272,7 @@ class FeishuAdapter(BasePlatformAdapter):
         )
         if not self._submit_on_loop(loop, coro):
             return self._card_response()
-        return self._card_response(self._build_resolved_approval_card(choice=choice, user_name=user_name))
+        return self._card_response(build_resolved_approval_card(choice=choice, user_name=user_name))
 
     def _handle_update_prompt_card_action(self, *, event: Any, action_value: dict[str, Any], loop: Any) -> Any:
         """Schedule update prompt resolution and build the synchronous callback response."""
@@ -2316,7 +2295,7 @@ class FeishuAdapter(BasePlatformAdapter):
         coro = self._resolve_update_prompt(prompt_id, answer, user_name, open_id=open_id, chat_id=chat_id)
         if not self._submit_on_loop(loop, coro):
             return self._card_response()
-        return self._card_response(self._build_resolved_update_prompt_card(answer=answer, user_name=user_name))
+        return self._card_response(build_resolved_update_prompt_card(answer=answer, user_name=user_name))
 
     def _pop_validated_prompt_state(
         self, *, states: dict[int, dict[str, str]], ident: Any, label: str, open_id: str, chat_id: str,
