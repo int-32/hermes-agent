@@ -262,6 +262,10 @@ FEISHU_BOT_USER_ID=xxx        # required if your app uses sender_id_type=user_id
 FEISHU_BOT_NAME=MyBot         # only when auto-detection fails
 ```
 
+## One Topic per Message (auto_thread)
+
+Set `FEISHU_AUTO_THREAD=true` (or `feishu.extra.auto_thread: true`) to have Hermes answer every top-level message in a new topic, in DMs and groups alike, the way Slack threads work. Each topic is its own session, keyed by the topic's root message, so results delivered later (kanban, cron) land in the topic they belong to. Messages already inside a topic stay there. Off by default.
+
 ## Bot-to-Bot Messaging
 
 By default Hermes ignores messages sent by other bots. Enable bot-to-bot messaging when you want Hermes to participate in A2A orchestration or receive notifications from other bots in the same group.

@@ -2529,3 +2529,66 @@ def test_processing_failure_skips_cross_mark_when_typing_removal_fails(fake_lark
     assert tracker.created == ["Typing"]
     assert tracker.deleted == ["r_typing"]
     assert adapter._pending_processing_reactions["om_msg"] == "r_typing"
+
+
+class TestFeishuAutoThread(unittest.TestCase):
+    """``auto_thread``: every top-level message opens its own topic, keyed by its root message id."""
+
+    def _inbound_thread_id(self, *, message_id, root_id, thread_id, auto_thread=True):
+        adapter = TestFeishuProcessInboundMessage._build_adapter(None)
+        adapter._auto_thread = auto_thread
+        message = SimpleNamespace(
+            content=json.dumps({"text": "做个任务"}), message_type="text", message_id=message_id,
+            mentions=[], chat_id="oc_dm", parent_id=None, upper_message_id=None,
+            root_id=root_id, thread_id=thread_id,
+        )
+        asyncio.run(adapter._process_inbound_message(
+            data=message, message=message, sender_id=None, chat_type="p2p", message_id=message_id,
+        ))
+        return adapter.build_source.call_args.kwargs["thread_id"]
+
+    def test_top_level_message_becomes_its_own_topic(self):
+        self.assertEqual(self._inbound_thread_id(message_id="om_new", root_id=None, thread_id=None), "om_new")
+
+    def test_message_in_topic_keys_on_root(self):
+        self.assertEqual(
+            self._inbound_thread_id(message_id="om_2", root_id="om_new", thread_id="omt_native"), "om_new")
+
+    def test_quote_reply_outside_topic_opens_new_topic(self):
+        self.assertEqual(self._inbound_thread_id(message_id="om_q", root_id="om_old", thread_id=None), "om_q")
+
+    def test_off_by_default_keeps_native_thread_id(self):
+        self.assertIsNone(self._inbound_thread_id(message_id="om_new", root_id=None, thread_id=None, auto_thread=False))
+
+    @patch.dict(os.environ, {"FEISHU_AUTO_THREAD": "true"}, clear=True)
+    def test_setting_reads_env(self):
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+        self.assertTrue(FeishuAdapter._load_settings({}).auto_thread)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_send_without_reply_target_replies_to_root_in_thread(self):
+        """Out-of-turn sends (kanban results, cron) carry only the om_ topic key."""
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = {}
+
+        class _MessageAPI:
+            def reply(self, request):
+                captured["request"] = request
+                return SimpleNamespace(success=lambda: True, data=SimpleNamespace(message_id="om_out"))
+
+            def create(self, request):
+                raise AssertionError("create() cannot target an om_ topic key")
+
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=_MessageAPI())))
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        adapter._run_blocking = _direct
+        result = asyncio.run(adapter.send("oc_dm", "任务完成", metadata={"thread_id": "om_new"}))
+        self.assertTrue(result.success)
+        self.assertEqual(captured["request"].message_id, "om_new")
+        self.assertTrue(captured["request"].request_body.reply_in_thread)
