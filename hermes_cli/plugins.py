@@ -815,6 +815,25 @@ class PluginContext(PluginInjectionContext):
         logger.debug("Plugin %s registered Slack action handler: %s", self.manifest.name, action_id)
         return handle
 
+    def register_feishu_card_action_handler(self, key: str, callback: Callable) -> PluginRegistration:
+        """Register a Feishu card-button handler for buttons whose value carries
+        ``{"hermes_plugin_action": key, ...}``. ``callback(open_id, value)`` runs synchronously in
+        the SDK callback (keep it fast, no model calls) and may return a card dict that replaces
+        the clicked card inline; the click never reaches an agent. Raises ``ValueError`` for a
+        non-callable callback or empty ``key``."""
+        if not callable(callback):
+            raise self._refuse("a Feishu card action handler with a non-callable callback")
+        key = (key or "").strip() if isinstance(key, str) else ""
+        if not key:
+            raise self._refuse("a Feishu card action handler with an empty key")
+        entry = (key, callback, self.manifest.name)
+        handlers = self._manager._feishu_card_action_handlers
+        handlers.append(entry)
+        handle = self._track("feishu_card_action_handler", key,
+                             lambda: self._manager._remove_identity(handlers, entry))
+        logger.debug("Plugin %s registered Feishu card action handler: %s", self.manifest.name, key)
+        return handle
+
     def register_platform_handler(self, platform: str, factory: Callable) -> None:
         """Register ``factory(native, adapter)``, invoked at ``connect()`` before/as the core handlers
         register (``adapter`` read-only). ``native``: telegram PTB ``Application``, discord
@@ -1182,6 +1201,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self._aux_tasks: dict[str, dict[str, Any]] = {}
         self._approval_transports: dict[str, Any] = {}
         self._slack_action_handlers: list[tuple] = []
+        self._feishu_card_action_handlers: list[tuple] = []
         self._platform_handler_factories: dict[str, list[tuple]] = {}
         # Process-owned discovery listeners (``on_plugin_loaded``); never cleared by unload().
         self._plugin_loaded_listeners: list[Callable] = []
@@ -1513,6 +1533,13 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
     def get_slack_action_handlers(self) -> list[tuple]:
         """``(action_id, callback, plugin_name)`` tuples for the Slack adapter to wire at connect."""
         return list(self._slack_action_handlers)
+
+    def get_feishu_card_action_handler(self, key: str) -> Optional[tuple]:
+        """``(callback, plugin_name)`` for a ``hermes_plugin_action`` key (latest registration wins)."""
+        for k, callback, plugin_name in reversed(self._feishu_card_action_handlers):
+            if k == key:
+                return callback, plugin_name
+        return None
 
     def get_platform_handler_factories(self, platform: str) -> list[tuple]:
         """``(factory, plugin_name)`` tuples for one platform; adapters call ``factory(native,
