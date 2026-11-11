@@ -160,3 +160,27 @@ def test_gateway_chat_approve_checks_sender(kanban_home, monkeypatch, event, app
         assert kb.is_awaiting_approval(conn, gate) is (not approved)
         assert _status(conn, child) == ("ready" if approved else "todo")
     assert reply.startswith("✅" if approved else "⛔")
+
+
+def test_gateway_chat_approve_finds_task_on_other_board(kanban_home, monkeypatch):
+    """``/kanban approve <id>`` without ``--board`` finds the gate on whichever board holds it."""
+    from gateway import slash_commands
+    import hermes_cli.config as cfg
+    from hermes_cli.kanban_db_boards import create_board
+    monkeypatch.setattr(cfg, "load_config", lambda: {"kanban": {"approvers": ["slack:UOWNER"]}})
+    create_board("ops")
+    with kbc.connect_closing(board="ops") as conn:
+        gate, child = _gate_with_child(conn)
+    reply = slash_commands._kanban_chat_approve(_event("UOWNER"), f"approve {gate}", None)
+    assert reply.startswith("✅"), reply
+    with kbc.connect_closing(board="ops") as conn:
+        assert not kb.is_awaiting_approval(conn, gate)
+        assert _status(conn, child) == "ready"
+
+
+def test_gateway_chat_approve_reports_unknown_task(kanban_home, monkeypatch):
+    from gateway import slash_commands
+    import hermes_cli.config as cfg
+    monkeypatch.setattr(cfg, "load_config", lambda: {"kanban": {"approvers": ["slack:UOWNER"]}})
+    reply = slash_commands._kanban_chat_approve(_event("UOWNER"), "approve t_deadbeef", None)
+    assert "not found on any board" in reply
