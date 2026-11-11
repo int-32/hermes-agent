@@ -257,6 +257,17 @@ gateway:
       board_tag: "[{board}] "
       assignee_tag: "@{assignee} "
       head: "{board_tag}{assignee_tag}Kanban {task_id}"
+    card:
+      title_completed: "Виконано: {title}"
+      title_blocked: "Заблоковано: {title}"
+      title_gave_up: "Припинено: {title}"
+      title_triage: "Потребує тріажу: {title}"
+      fact_task: "Завдання"
+      fact_board: "Дошка"
+      fact_assignee: "Виконавець"
+      decision_label: "Що потрібно зробити"
+      decision_unblock: "Усуньте причину, потім `hermes kanban unblock {task_id}` (або `hermes kanban reassign {task_id}`). Журнали: `hermes kanban log {task_id}`."
+      truncated_note: "Повний звіт додано файлом."
   personality:
     none_configured: "У `{path}/config.yaml` не налаштовано жодної особистості"
     header: "🎭 **Доступні особистості**\n"

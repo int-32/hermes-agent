@@ -257,6 +257,17 @@ gateway:
       board_tag: "[{board}] "
       assignee_tag: "@{assignee} "
       head: "{board_tag}{assignee_tag}Kanban {task_id}"
+    card:
+      title_completed: "已完成：{title}"
+      title_blocked: "已阻塞：{title}"
+      title_gave_up: "已放棄：{title}"
+      title_triage: "待分診：{title}"
+      fact_task: "任務"
+      fact_board: "看板"
+      fact_assignee: "執行者"
+      decision_label: "需要你做什麼"
+      decision_unblock: "請修復原因後執行 `hermes kanban unblock {task_id}`（或 `hermes kanban reassign {task_id}`）。日誌：`hermes kanban log {task_id}`。"
+      truncated_note: "完整報告見附件。"
   personality:
     none_configured: "`{path}/config.yaml` 中未設定人格"
     header: "🎭 **可用人格**\n"

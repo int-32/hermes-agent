@@ -257,6 +257,17 @@ gateway:
       board_tag: "[{board}] "
       assignee_tag: "@{assignee} "
       head: "{board_tag}{assignee_tag}칸반 {task_id}"
+    card:
+      title_completed: "완료: {title}"
+      title_blocked: "차단됨: {title}"
+      title_gave_up: "포기됨: {title}"
+      title_triage: "분류 필요: {title}"
+      fact_task: "작업"
+      fact_board: "보드"
+      fact_assignee: "담당자"
+      decision_label: "해야 할 일"
+      decision_unblock: "원인을 해결한 뒤 `hermes kanban unblock {task_id}`(또는 `hermes kanban reassign {task_id}`)를 실행하세요. 로그: `hermes kanban log {task_id}`."
+      truncated_note: "전체 보고서는 첨부 파일을 확인하세요."
   personality:
     none_configured: "`{path}/config.yaml`에 구성된 성격이 없습니다"
     header: "🎭 **사용 가능한 성격**\n"
