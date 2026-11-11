@@ -107,7 +107,23 @@ def _git_out(cwd: Path, *args: str, timeout: int = 30) -> Optional[str]:
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 
 # Typed block reasons (routing in ``_route_block``); ``None`` = legacy un-typed.
-VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
+VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient", "approval"}
+
+# ``approval`` blocks are a human gate: no agent path (tool, CLI unblock/complete/
+# archive/promote/unlink, auto-promotion) may release them. Only :func:`approve_task`
+# does, called by a human surface (gateway approver, interactive CLI, dashboard).
+APPROVAL_BLOCK_KIND = "approval"
+
+
+class ApprovalRequiredError(ValueError):
+    """A mutation would release a task parked on an ``approval`` block."""
+
+    def __init__(self, task_id: str, op: str):
+        super().__init__(
+            f"{task_id} is waiting for human approval; {op} cannot release it. "
+            f"Only a configured approver can (chat: `/kanban approve {task_id}`; "
+            f"terminal: `hermes kanban approve {task_id}`; or the dashboard).")
+        self.task_id = task_id
 
 # Same-reason block -> unblock -> re-block cycles before routing to ``triage``.
 # Counts unblock recurrences, NOT dispatcher failures (``DEFAULT_FAILURE_LIMIT``).
@@ -1402,6 +1418,8 @@ def _would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> boo
 
 
 def unlink_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
+    # Dropping the edge would let the child skip the approval gate.
+    _refuse_if_awaiting_approval(conn, parent_id, "unlink")
     with write_txn(conn):
         cur = conn.execute(
             "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?", (parent_id, child_id),
@@ -1902,6 +1920,20 @@ def _parents_satisfied(conn: sqlite3.Connection, task_id: str) -> bool:
         "WHERE l.child_id = ? "
         "AND p.status NOT IN ('done', 'archived') LIMIT 1", (task_id,),
     ).fetchone() is None
+
+
+def is_awaiting_approval(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True while *task_id* is parked on an ``approval`` block."""
+    row = conn.execute(
+        "SELECT 1 FROM tasks WHERE id = ? AND status = 'blocked' AND block_kind = ?",
+        (task_id, APPROVAL_BLOCK_KIND),
+    ).fetchone()
+    return row is not None
+
+
+def _refuse_if_awaiting_approval(conn: sqlite3.Connection, task_id: str, op: str) -> None:
+    if is_awaiting_approval(conn, task_id):
+        raise ApprovalRequiredError(task_id, op)
 
 
 def unsatisfied_parents(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, str]]:
@@ -2444,7 +2476,7 @@ def complete_task(
     conn: sqlite3.Connection, task_id: str, *, result: Optional[str] = None,
     summary: Optional[str] = None, metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None, expected_run_id: Optional[int] = None,
-    fire_lifecycle_hook: bool = True, force: bool = False,
+    fire_lifecycle_hook: bool = True, force: bool = False, _approved: bool = False,
 ) -> bool:
     """``running|ready|blocked|review -> done``; records ``result``.
 
@@ -2464,6 +2496,8 @@ def complete_task(
     auditable event. Approving a card out of ``review`` stays exempt.
     """
     now = int(time.time())
+    if not _approved:
+        _refuse_if_awaiting_approval(conn, task_id, "complete")
     # Cheap pre-check; re-checked inside the txn to close the parent-reopen race.
     if not _parents_satisfied(conn, task_id):
         return False
@@ -3039,6 +3073,10 @@ def _route_block(
     payload = {"reason": reason, "kind": kind, "source_status": source_status}
     if kind == "dependency":
         return "todo", "dependency_wait", "block_kind    = ?", (kind,), payload
+    if kind == APPROVAL_BLOCK_KIND:
+        # Waiting for a human is not a loop; never route an approval gate to triage.
+        return ("blocked", "blocked", "block_kind    = ?,\n                       block_recurrences = ?",
+                (kind, 1), {**payload, "recurrences": 1})
     recurrences = prev_recurrences + 1 if prev_kind == kind else 1
     set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
     payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
@@ -3292,6 +3330,8 @@ def promote_task(
     cur_status = _task_status(conn, task_id)
     if cur_status is None:
         return False, f"task {task_id} not found"
+    if is_awaiting_approval(conn, task_id):
+        return False, str(ApprovalRequiredError(task_id, "promote"))
 
     if cur_status not in ("todo", "blocked"):
         return False, (
@@ -3361,9 +3401,12 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(conn: sqlite3.Connection, task_id: str, *, _approved: bool = False) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
+    when that is where it left off), closing any leaked run first. An ``approval``
+    block is refused here; :func:`approve_task` is its only exit."""
+    if not _approved:
+        _refuse_if_awaiting_approval(conn, task_id, "unblock")
     now = int(time.time())
     with write_txn(conn):
         resume_status = (
@@ -3403,6 +3446,32 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
             ),
         )
         return True
+
+
+def approve_task(conn: sqlite3.Connection, task_id: str, *, approver: str) -> bool:
+    """Release an ``approval`` block on behalf of a human *approver* (e.g.
+    ``slack:U123``, ``cli:alice``, ``dashboard``). Callers must have verified the
+    approver themselves; this function only records who it was. A task with an
+    assignee resumes (its worker continues); a pure gate step with no assignee
+    completes, which releases its children. False when the task is not awaiting
+    approval."""
+    approver = (approver or "").strip()
+    if not approver:
+        raise ValueError("approve_task requires an approver")
+    if not is_awaiting_approval(conn, task_id):
+        return False
+    open_parents = unsatisfied_parents(conn, task_id)
+    if open_parents:
+        # Approving before the work to approve exists would be a blank cheque.
+        raise ValueError(f"{task_id} cannot be approved yet; still waiting on "
+                         + ", ".join(f"{pid} ({st})" for pid, st in open_parents))
+    task = get_task(conn, task_id)
+    with write_txn(conn):
+        _append_event(conn, task_id, "approved", {"approver": approver})
+    if task is not None and task.assignee:
+        return unblock_task(conn, task_id, _approved=True)
+    return complete_task(
+        conn, task_id, result=f"approved by {approver}", _approved=True, force=True)
 
 
 def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -3607,6 +3676,8 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None) -> b
     termination outcome lands as its own ``archive_worker_termination`` event so
     the ``archived`` event stays atomic with the status flip.
     """
+    # Archived parents release their children, so archiving would bypass the gate.
+    _refuse_if_awaiting_approval(conn, task_id, "archive")
     with write_txn(conn):
         row = conn.execute(
             "SELECT status, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?",

@@ -617,6 +617,12 @@ def _apply_status(conn, task_id: str, s: str, p, unknown_detail: str) -> bool:
     handler = _STATUS_HANDLERS.get(s)
     if handler is None:
         raise _StatusRejected(unknown_detail)
+    if kanban_db.is_awaiting_approval(conn, task_id):
+        # The dashboard is a password-protected human surface: moving an approval
+        # gate forward IS the approval. Every other move is refused.
+        if s in ("ready", "done"):
+            return kanban_db.approve_task(conn, task_id, approver="dashboard")
+        raise _StatusRejected(f"{task_id} is waiting for approval; move it to ready or done to approve")
     return handler(conn, task_id, p)
 
 
@@ -646,7 +652,8 @@ def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_d
     (naming the blocking parent(s) for ``ready``/``done``/``review`` so the UI renders an actionable toast)."""
     s = payload.status
     if s == "archived":
-        ok = kanban_db.archive_task(conn, task_id)
+        with _map_errors(400, ValueError):
+            ok = kanban_db.archive_task(conn, task_id)
     else:
         with _map_errors(400, _StatusRejected, ValueError):
             ok = _apply_status(conn, task_id, s, payload, f"unknown status: {s}")
@@ -829,15 +836,19 @@ def add_link(payload: LinkBody, board: Optional[str] = Query(None)):
 
 @router.delete("/links")
 def delete_link(parent_id: str = Query(...), child_id: str = Query(...), board: Optional[str] = Query(None)):
-    with _board_conn(board) as (board, conn):
+    with _board_conn(board) as (board, conn), _value_error_400():
         return {"ok": bool(kanban_db.unlink_tasks(conn, parent_id, child_id))}
 
 
 def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str], entry: dict) -> None:
     """Apply the bulk patch to one task, recording refusals in ``entry`` without aborting the
     remaining ops — except a rejected status verb (``_StatusRejected`` propagates)."""
-    if payload.archive and not kanban_db.archive_task(conn, tid):
-        entry.update(ok=False, error="archive refused")
+    if payload.archive:
+        try:
+            if not kanban_db.archive_task(conn, tid):
+                entry.update(ok=False, error="archive refused")
+        except kanban_db.ApprovalRequiredError as e:
+            entry.update(ok=False, error=str(e))
     if payload.status is not None and not payload.archive:
         s = payload.status
         if not _apply_status(conn, tid, s, payload, f"unknown status {s!r}"):

@@ -326,7 +326,8 @@ _SPECS = [
         _arg("--kind", choices=sorted(kb.VALID_BLOCK_KINDS),
              help="Typed block reason. 'dependency' waits in todo (auto-promoted when "
                   "parents finish, no human); 'needs_input'/'capability' go to "
-                  "blocked for a human; 'transient' marks a maybe-flaky failure. "
+                  "blocked for a human; 'transient' marks a maybe-flaky failure; "
+                  "'approval' is a human gate only `kanban approve` can release. "
                   "Repeated same-kind re-blocks after unblock route the task to "
                   "triage to break unblock loops. Omit for a generic block."),
     ], help="Mark one or more tasks blocked"),
@@ -339,6 +340,10 @@ _SPECS = [
         _reason("Optional reason/note — recorded as a comment before unblocking. Quote multi-word reasons."),
         _TASK_IDS,
     ], help="Return blocked/scheduled tasks to ready, or todo while parents remain open"),
+    _cmd("approve", [
+        _TASK_ID,
+    ], help="Release a task waiting on an 'approval' block (interactive terminal only; "
+            "in chat only configured kanban.approvers may run it)"),
     _cmd("request-review", [
         _TASK_ID,
         _arg("--summary", help="What was implemented and how it was verified — shown to the reviewer."),
