@@ -257,6 +257,17 @@ gateway:
       board_tag: "[{board}] "
       assignee_tag: "@{assignee} "
       head: "{board_tag}{assignee_tag}Kanban {task_id}"
+    card:
+      title_completed: "Déanta: {title}"
+      title_blocked: "Blocáilte: {title}"
+      title_gave_up: "Tréigthe: {title}"
+      title_triage: "Triáiseáil ag teastáil: {title}"
+      fact_task: "Tasc"
+      fact_board: "Clár"
+      fact_assignee: "Sannaí"
+      decision_label: "An rud atá le déanamh agat"
+      decision_unblock: "Réitigh an chúis, ansin `hermes kanban unblock {task_id}` (nó `hermes kanban reassign {task_id}`). Logaí: `hermes kanban log {task_id}`."
+      truncated_note: "Tuarascáil iomlán ceangailte mar chomhad."
   personality:
     none_configured: "Níl aon phearsantachtaí cumraithe in `{path}/config.yaml`"
     header: "🎭 **Pearsantachtaí ar fáil**\n"

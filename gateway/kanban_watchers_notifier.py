@@ -18,6 +18,7 @@ from typing import Any, Callable, Optional
 from agent.i18n import t
 
 from gateway.kanban_watchers_common import _list_boards, _to_thread_process_service, logger
+from gateway.structured_notice import build_kanban_notice
 from gateway.wake import session_owned_by_profile
 
 
@@ -731,8 +732,28 @@ class _KanbanNotification:
                                notification_category="diagnostic" if self.wake_diagnostic else "result")
         self._log_woke()
 
-    async def _send_event(self, ev: Any, msg: str) -> bool:
-        """Send one text ping; raises on adapter exception or SendResult(success=False)."""
+    async def _send_notice(self, ev: Any, msg: str, direct_text: Optional[str], metadata: dict) -> Any:
+        """Offer the structured card when the adapter has one; a refusal or error falls back to ``msg``.
+
+        ``msg`` is the notice's ``fallback_text``, so an adapter without cards sends what it always did.
+        """
+        adapter, chat_id = self.adapter, self.sub["chat_id"]
+        notice = build_kanban_notice(ev, self, msg, direct_text)
+        if notice is not None and getattr(type(adapter), "send_structured_notice", None) is not None:
+            try:
+                res = await adapter.send_structured_notice(chat_id, notice, metadata)
+            except Exception as exc:  # health: allow BLE001 -- any card failure must fall back to the text ping
+                logger.warning("kanban notifier: structured %s notice for %s failed, sending text: %s",
+                               ev.kind, self.task_id, exc, exc_info=True)
+            else:
+                if getattr(res, "success", True) is not False:
+                    return res
+                logger.warning("kanban notifier: structured %s notice for %s refused, sending text: %s",
+                               ev.kind, self.task_id, getattr(res, "error", None) or "unknown error")
+        return await adapter.send(chat_id, msg, metadata=metadata)
+
+    async def _send_event(self, ev: Any, msg: str, direct_text: Optional[str] = None) -> bool:
+        """Send one ping; raises on adapter exception or SendResult(success=False)."""
         from gateway.warning_notifications import present_notification
         sub, adapter = self.sub, self.adapter
         delivery_metadata = sub.get("delivery_metadata")
@@ -742,7 +763,7 @@ class _KanbanNotification:
         _send_res = None
         async def send_ping():
             nonlocal _send_res
-            _send_res = await adapter.send(sub["chat_id"], msg, metadata=metadata)
+            _send_res = await self._send_notice(ev, msg, direct_text, metadata)
         if not await present_notification(send_ping, platform=self.platform_str, diagnostic=diagnostic_event(ev)):
             return False
         # SendResult(success=False) without an exception is a FAILED delivery
@@ -790,7 +811,7 @@ class _KanbanNotification:
             if ev.id <= self.sub.get("last_ping_event_id", 0):
                 continue
             try:
-                if await self._send_event(ev, direct_text or msg) is False:
+                if await self._send_event(ev, direct_text or msg, direct_text) is False:
                     continue
                 if direct_text:
                     await self._mirror_direct_reply(direct_text)

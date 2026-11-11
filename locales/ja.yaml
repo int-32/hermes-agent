@@ -257,6 +257,17 @@ gateway:
       board_tag: "[{board}] "
       assignee_tag: "@{assignee} "
       head: "{board_tag}{assignee_tag}Kanban {task_id}"
+    card:
+      title_completed: "完了：{title}"
+      title_blocked: "ブロック中：{title}"
+      title_gave_up: "断念：{title}"
+      title_triage: "トリアージ待ち：{title}"
+      fact_task: "タスク"
+      fact_board: "ボード"
+      fact_assignee: "担当者"
+      decision_label: "必要な対応"
+      decision_unblock: "原因を修正してから `hermes kanban unblock {task_id}`（または `hermes kanban reassign {task_id}`）を実行してください。ログ：`hermes kanban log {task_id}`。"
+      truncated_note: "完全なレポートは添付ファイルを参照してください。"
   personality:
     none_configured: "`{path}/config.yaml` に人格が設定されていません"
     header: "🎭 **利用可能な人格**\n"

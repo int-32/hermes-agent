@@ -260,6 +260,17 @@ gateway:
       board_tag: "[{board}] "
       assignee_tag: "@{assignee} "
       head: "{board_tag}{assignee_tag}Kanban {task_id}"
+    card:
+      title_completed: "Kész: {title}"
+      title_blocked: "Blokkolva: {title}"
+      title_gave_up: "Feladva: {title}"
+      title_triage: "Osztályozás szükséges: {title}"
+      fact_task: "Feladat"
+      fact_board: "Tábla"
+      fact_assignee: "Felelős"
+      decision_label: "Teendőd"
+      decision_unblock: "Hárítsd el az okot, majd `hermes kanban unblock {task_id}` (vagy `hermes kanban reassign {task_id}`). Naplók: `hermes kanban log {task_id}`."
+      truncated_note: "A teljes jelentés fájlként csatolva."
   personality:
     none_configured: "Nincs személyiség beállítva itt: `{path}/config.yaml`"
     header: "🎭 **Elérhető személyiségek**\n"

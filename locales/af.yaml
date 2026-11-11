@@ -257,6 +257,17 @@ gateway:
       board_tag: "[{board}] "
       assignee_tag: "@{assignee} "
       head: "{board_tag}{assignee_tag}Kanban {task_id}"
+    card:
+      title_completed: "Klaar: {title}"
+      title_blocked: "Geblokkeer: {title}"
+      title_gave_up: "Opgegee: {title}"
+      title_triage: "Benodig triage: {title}"
+      fact_task: "Taak"
+      fact_board: "Bord"
+      fact_assignee: "Toegewys aan"
+      decision_label: "Wat jy moet doen"
+      decision_unblock: "Herstel die oorsaak, dan `hermes kanban unblock {task_id}` (of `hermes kanban reassign {task_id}`). Logs: `hermes kanban log {task_id}`."
+      truncated_note: "Volledige verslag as lêer aangeheg."
   personality:
     none_configured: "Geen persoonlikhede opgestel in `{path}/config.yaml` nie"
     header: "🎭 **Beskikbare Persoonlikhede**\n"

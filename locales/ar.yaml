@@ -257,6 +257,17 @@ gateway:
       board_tag: "[{board}] "
       assignee_tag: "@{assignee} "
       head: "{board_tag}{assignee_tag}كانبان {task_id}"
+    card:
+      title_completed: "تم: {title}"
+      title_blocked: "محظورة: {title}"
+      title_gave_up: "تم التخلي: {title}"
+      title_triage: "تحتاج فرزًا: {title}"
+      fact_task: "المهمة"
+      fact_board: "اللوحة"
+      fact_assignee: "المكلَّف"
+      decision_label: "ما عليك فعله"
+      decision_unblock: "أصلح السبب، ثم `hermes kanban unblock {task_id}` (أو `hermes kanban reassign {task_id}`). السجلات: `hermes kanban log {task_id}`."
+      truncated_note: "التقرير الكامل مرفق كملف."
   personality:
     none_configured: "لا توجد شخصيات مُهيّأة في `{path}/config.yaml`"
     header: "🎭 **الشخصيات المتاحة**\n"

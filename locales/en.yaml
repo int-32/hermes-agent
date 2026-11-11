@@ -260,6 +260,17 @@ gateway:
       board_tag: "[{board}] "
       assignee_tag: "@{assignee} "
       head: "{board_tag}{assignee_tag}Kanban {task_id}"
+    card:
+      title_completed: "Done: {title}"
+      title_blocked: "Blocked: {title}"
+      title_gave_up: "Gave up: {title}"
+      title_triage: "Needs triage: {title}"
+      fact_task: "Task"
+      fact_board: "Board"
+      fact_assignee: "Assignee"
+      decision_label: "What you need to do"
+      decision_unblock: "Fix the cause, then `hermes kanban unblock {task_id}` (or `hermes kanban reassign {task_id}`). Logs: `hermes kanban log {task_id}`."
+      truncated_note: "Full report attached as a file."
 
   personality:
     none_configured: "No personalities configured in `{path}/config.yaml`"
