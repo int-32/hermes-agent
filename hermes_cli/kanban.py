@@ -214,7 +214,7 @@ def _profile_author() -> str:
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "init", "create", "swarm", "assign", "reclaim", "reassign", "link", "unlink",
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
-    "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
+    "schedule", "unblock", "approve", "promote", "archive", "dispatch", "daemon", "repair",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review",
     "gc",
@@ -1039,6 +1039,28 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
                            lambda tid: f"cannot unblock {tid} (not blocked/scheduled?)")
 
 
+def _cmd_approve(args: argparse.Namespace) -> int:
+    """Human-only release of an ``approval`` block. Agents run shell commands
+    without a terminal, so an interactive TTY plus a typed task id is required;
+    chat approvals go through the gateway, which checks ``kanban.approvers``."""
+    tid = args.task_id
+    if os.environ.get("HERMES_KANBAN_TASK") or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return _err("kanban approve needs a human at an interactive terminal "
+                    "(in chat, a configured approver sends `/kanban approve <id>`)")
+    with kbc.connect_closing() as conn:
+        if not kb.is_awaiting_approval(conn, tid):
+            return _err(f"{tid} is not waiting for approval")
+        task = kb.get_task(conn, tid)
+        print(f"{tid}: {task.title if task else ''}")
+        if input(f"Type {tid} to approve: ").strip() != tid:
+            return _err("not approved")
+        import getpass
+        if not kb.approve_task(conn, tid, approver=f"cli:{getpass.getuser()}"):
+            return _err(f"could not approve {tid}")
+    print(f"Approved {tid}")
+    return 0
+
+
 def _cmd_request_review(args: argparse.Namespace) -> int:
     tid = args.task_id
     summary = _stripped_or_none(getattr(args, "summary", None))
@@ -1334,7 +1356,7 @@ _HANDLERS = {
     "comment": _cmd_comment, "attach": _cmd_attach,
     "attachments": _cmd_attachments, "attach-rm": _cmd_attach_rm,
     "complete": _cmd_complete, "edit": _cmd_edit, "block": _cmd_block,
-    "schedule": _cmd_schedule, "unblock": _cmd_unblock,
+    "schedule": _cmd_schedule, "unblock": _cmd_unblock, "approve": _cmd_approve,
     "request-review": _cmd_request_review, "request-changes": _cmd_request_changes,
     "reopen-review": _cmd_reopen_review, "promote": _cmd_promote,
     "archive": _cmd_archive, "tail": _cmd_tail, "dispatch": _cmd_dispatch,

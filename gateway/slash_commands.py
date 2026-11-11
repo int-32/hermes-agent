@@ -366,6 +366,8 @@ class GatewaySlashCommandsMixin(
             else:
                 action = tok
                 break
+        if action == "approve":
+            return await asyncio.to_thread(_kanban_chat_approve, event, text, requested_board)
         try:
             output = await asyncio.to_thread(run_slash, text)
         except Exception as exc:  # pragma: no cover - defensive
@@ -1381,3 +1383,40 @@ class GatewaySlashCommandsMixin(
             return t("gateway.update.start_failed", error=e)
         self._schedule_update_notification_watch()
         return t("gateway.update.starting")
+
+
+def _kanban_chat_approve(event: MessageEvent, text: str, requested_board: Optional[str]) -> str:
+    """``/kanban approve <id>``: release an ``approval`` block when the sender is a
+    configured approver. Decided here in code from the platform sender id, never by a
+    model; bot, internal, relayed and plugin-injected events are refused."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.config import load_config
+
+    source = event.source
+    platform = getattr(source, "platform", None)
+    platform_str = (platform.value if hasattr(platform, "value") else str(platform or "")).lower()
+    sender = f"{platform_str}:{source.user_id}" if source.user_id else ""
+    try:
+        approvers = {str(a).strip() for a in
+                     (((load_config() or {}).get("kanban") or {}).get("approvers") or [])}
+    except Exception as exc:
+        logger.warning("kanban approve: cannot load config (%s)", exc)
+        approvers = set()
+    trusted = (not event.internal and event.allow_gateway_control and not source.is_bot
+               and not source.delivered_via_upstream_relay)
+    ids = re.findall(r"\bt_[0-9a-f]+\b", text)
+    if len(ids) != 1:
+        return "usage: /kanban approve <task_id> (one task at a time)"
+    tid = ids[0]
+    if not (trusted and sender and sender in approvers):
+        logger.warning("kanban approve refused for %s by %r", tid, sender)
+        return f"⛔ {tid} not approved: only a configured approver (kanban.approvers) can approve it."
+    from hermes_cli import kanban_db_connect as kbc
+    try:
+        with kbc.connect_closing(board=requested_board or None) as conn:
+            if not kb.approve_task(conn, tid, approver=sender):
+                return f"{tid} is not waiting for approval."
+            task = kb.get_task(conn, tid)
+    except Exception as exc:
+        return t("gateway.kanban.error_prefix", error=exc)
+    return f"✅ Approved {tid} ({task.status if task else 'done'})"
