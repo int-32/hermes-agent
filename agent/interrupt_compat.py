@@ -19,6 +19,21 @@ def _accepts_keyword(callable_obj: Any, name: str) -> bool:
     )
 
 
+def _accepts_positional(callable_obj: Any) -> bool:
+    """Return whether a callable can take a positional argument (the stop message).
+
+    An uninspectable callable keeps the legacy ABI and receives the message."""
+    try:
+        parameters = inspect.signature(callable_obj).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    return any(
+        p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                   inspect.Parameter.VAR_POSITIONAL)
+        for p in parameters
+    )
+
+
 def request_hard_interrupt(
     agent: Any,
     message: str | None = None,
@@ -29,9 +44,10 @@ def request_hard_interrupt(
 
     New agents expose ``hard_interrupt(message=None)``; third-party agents and old test
     doubles may only expose ``interrupt(message=None)`` and must not receive keyword
-    arguments they do not know. ``tool_reason`` is a trusted, fixed category that may be
-    exposed in model-visible tool cancellation output, forwarded only when the callable
-    explicitly supports it. Returns ``False`` only when neither callable is available.
+    arguments they do not know; a managed worker's ``interrupt()`` takes no message at all.
+    ``tool_reason`` is a trusted, fixed category that may be exposed in model-visible tool
+    cancellation output, forwarded only when the callable explicitly supports it. Returns
+    ``False`` only when neither callable is available.
     """
     # Static lookup first: a dynamic ``__getattr__`` proxy (unspecced MagicMock, RPC
     # facade) must not be treated as genuinely implementing the new ABI.
@@ -48,7 +64,8 @@ def request_hard_interrupt(
     kwargs = {}
     if tool_reason is not None and _accepts_keyword(interrupt, "tool_reason"):
         kwargs["tool_reason"] = tool_reason
-    if message is None:
+    # A message-less stop (``ManagedWorker.interrupt()``) is still a stop; drop only the message.
+    if message is None or not _accepts_positional(interrupt):
         interrupt(**kwargs)
     else:
         interrupt(message, **kwargs)

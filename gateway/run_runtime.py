@@ -254,25 +254,14 @@ def stop_authority_turns(authority, *, in_process=False, reason=None):
     ``reason`` (a gateway restart/shutdown) is recorded on each worker it signals, so the turn settles
     with that cause; a worker already stopped (the user's Stop came first) keeps none. A worker
     still being spawned gets the same Stop and cause through latches (``_stop_spawning_managed``)."""
-    from hermes_state_runtime import RuntimeStoreError
-    signalled = 0
     workers = getattr(authority, '_managed_workers', {})
-    for worker in list(workers.values()):
-        if worker.closed.is_set() or (getattr(worker, 'stop', None) is not None and worker.stop.is_set()):
-            continue
-        worker.stop_cause = reason
-        try:
-            worker.control({'type': 'stop'})
-        except RuntimeStoreError as exc:
-            # A full control queue: control() latched worker.stop first, and the owner's read
-            # loop escalates on that latch alone (terminate after STOP_ACK_SECONDS).
-            logger.debug('managed Stop not queued (%s); the latch escalates it', exc.reason)
-        signalled += 1
+    signalled = sum(_stop_managed_worker(worker, reason) for worker in list(workers.values()))
     signalled += _stop_spawning_managed(authority, workers, reason)
     if not in_process:
         return signalled
     from agent.interrupt_compat import request_hard_interrupt
     from gateway.run import _AGENT_PENDING_SENTINEL
+    from gateway.session_managed_worker import ManagedWorker
     running = getattr(authority.runner, '_running_agents', {})
     for sid, live in list(authority.sessions.items()):
         generation = live.event_stream.execution.get('execution_generation')
@@ -281,12 +270,33 @@ def stop_authority_turns(authority, *, in_process=False, reason=None):
         adopted_generation, agent = authority.adopted.get(sid, (None, None))
         if adopted_generation != generation:
             agent = running.get(live.route)
-        if agent is None or agent is _AGENT_PENDING_SENTINEL:
+        if isinstance(agent, ManagedWorker):
+            # Left the registry in execute_managed's finally (closing) but still adopted until the
+            # turn settles; join_authority_work re-runs this every 50ms through that window.
+            _stop_managed_worker(agent, reason)
+        elif agent is None or agent is _AGENT_PENDING_SENTINEL:
             authority.pending_stops[sid] = generation
         else:
             request_hard_interrupt(agent, 'Profile stopping', tool_reason='gateway shutdown')
         signalled += 1
     return signalled
+
+
+def _stop_managed_worker(worker, reason):
+    """Send one Stop carrying *reason* to a managed worker; a closing or already-stopped one is
+    skipped (its close / first Stop settles it). Returns whether this call signalled it."""
+    from hermes_state_runtime import RuntimeStoreError
+    if worker.closed.is_set() or (getattr(worker, 'stop', None) is not None and worker.stop.is_set()):
+        return False
+    worker.stop_cause = reason
+    try:
+        worker.control({'type': 'stop'})
+    except RuntimeStoreError as exc:
+        # A full control queue: control() latched worker.stop first, and the owner's read loop
+        # escalates on that latch alone (terminate after STOP_ACK_SECONDS). A close that raced the
+        # check above (managed_worker_lost) is already tearing the worker down.
+        logger.debug('managed Stop not queued (%s); the latch escalates it', exc.reason)
+    return True
 
 
 def _stop_spawning_managed(authority, workers, reason):
