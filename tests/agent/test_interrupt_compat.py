@@ -123,3 +123,53 @@ def test_tui_subagent_interrupt_is_an_explicit_hard_stop() -> None:
     assert len(agent.calls) == 1
     assert agent.calls[0][0] == "hard"
     assert subagent_id in agent.calls[0][1]
+
+
+class _ZeroArgAgent:
+    """The ``ManagedWorker.interrupt(self)`` shape: a stop that carries no message."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def interrupt(self) -> None:
+        self.calls += 1
+
+
+def test_zero_arg_interrupt_is_stopped_without_the_message() -> None:
+    agent = _ZeroArgAgent()
+
+    assert request_hard_interrupt(agent, "Profile stopping", tool_reason="gateway shutdown") is True
+
+    assert agent.calls == 1
+
+
+def test_message_still_reaches_an_interrupt_that_takes_it() -> None:
+    class _VarArgs:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def interrupt(self, *args) -> None:
+            self.calls.append(args)
+
+    legacy, var_args = _LegacyAgent(), _VarArgs()
+
+    assert request_hard_interrupt(legacy, "stop now", tool_reason="fixed category") is True
+    assert request_hard_interrupt(var_args, "stop now") is True
+
+    assert legacy.calls == [("legacy", "stop now")]
+    assert var_args.calls == [("stop now",)]
+
+
+def test_accepts_keyword_contract() -> None:
+    from agent.interrupt_compat import _accepts_keyword
+
+    def named(message=None, *, tool_reason=None): ...
+    def var_kw(message=None, **kwargs): ...
+    def positional_only(tool_reason, /): ...
+    def absent(message=None): ...
+
+    assert _accepts_keyword(named, "tool_reason") is True
+    assert _accepts_keyword(var_kw, "tool_reason") is True
+    assert _accepts_keyword(positional_only, "tool_reason") is False
+    assert _accepts_keyword(absent, "tool_reason") is False
+    assert _accepts_keyword(object(), "tool_reason") is False
