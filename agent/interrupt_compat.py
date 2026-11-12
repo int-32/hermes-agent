@@ -46,7 +46,8 @@ def request_hard_interrupt(
     doubles may only expose ``interrupt(message=None)`` and must not receive keyword
     arguments they do not know; a managed worker's ``interrupt()`` takes no message at all.
     ``tool_reason`` is a trusted, fixed category that may be exposed in model-visible tool
-    cancellation output, forwarded only when the callable explicitly supports it. Returns ``False`` only when neither callable is available.
+    cancellation output, forwarded only when the callable explicitly supports it. Returns
+    ``False`` only when neither callable is available.
     """
     # Static lookup first: a dynamic ``__getattr__`` proxy (unspecced MagicMock, RPC
     # facade) must not be treated as genuinely implementing the new ABI.
