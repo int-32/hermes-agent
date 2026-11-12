@@ -209,10 +209,10 @@ def _resolve_skill_dir(name: str, category: str | None = None) -> Path:
 
 
 def _iter_skill_dirs(root: Path):
-    from agent.skill_utils import is_excluded_skill_path
-    for skill_md in root.rglob("SKILL.md"):
-        if not is_excluded_skill_path(skill_md):
-            yield skill_md.parent
+    from agent.skill_utils import iter_skill_index_files
+    # Share discovery with the read/index paths, including linked skills and categories.
+    for skill_md in iter_skill_index_files(root, "SKILL.md"):
+        yield skill_md.parent
 
 
 def _read_frontmatter_name(skill_md: Path) -> Optional[str]:
@@ -272,9 +272,10 @@ def _find_skill(name: str) -> Optional[dict[str, Any]]:
             if skill_dir.name == name:
                 return {"path": skill_dir}
             if local_root is not None:
-                resolved = skill_dir.resolve()
-                if (resolved.is_relative_to(local_root)
-                        and resolved.relative_to(local_root).as_posix() == name):  # POSIX form
+                # Keep the link's profile-relative name, not its external target's location.
+                local_path = skills_dir.resolve() / skill_dir.relative_to(skills_dir)
+                if (local_path.is_relative_to(local_root)
+                        and local_path.relative_to(local_root).as_posix() == name):  # POSIX form
                     return {"path": skill_dir}
             if _read_frontmatter_name(skill_dir / "SKILL.md") == name:
                 key = skill_dir / "SKILL.md"

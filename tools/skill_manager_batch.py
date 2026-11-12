@@ -156,6 +156,11 @@ def _snapshot_skills(names, snap_root, find_skill, create_targets):
 
 
 def _restore_snapshot(pre_dir, snap, post_dir, dir_pre_existed=False, written=()) -> None:
+    # Restore the directory that was written, never rename a profile's symlink and
+    # replace it with a copied directory while leaving its real target half-mutated.
+    if snap is not None:
+        pre_dir = pre_dir.resolve()
+        post_dir = post_dir.resolve() if post_dir is not None else None
     post_exists = post_dir is not None and post_dir.is_dir()
     if snap is None:
         if not post_exists:
